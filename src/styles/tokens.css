@@ -1,0 +1,25 @@
+:root {
+  color-scheme: dark;
+
+  --bg-base: #07090f;
+  --bg-raised: rgba(255, 255, 255, 0.045);
+  --bg-raised-hover: rgba(255, 255, 255, 0.075);
+  --border-soft: rgba(255, 255, 255, 0.09);
+
+  --text-primary: rgba(245, 247, 252, 0.94);
+  --text-secondary: rgba(214, 220, 234, 0.62);
+  --text-tertiary: rgba(196, 203, 220, 0.42);
+
+  --accent: #7fd1c4;
+  --accent-dim: rgba(127, 209, 196, 0.16);
+
+  --radius-lg: 18px;
+  --radius-md: 12px;
+  --radius-sm: 8px;
+
+  --font-ui: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  --font-display: "Segoe UI Variable Display", "Segoe UI", system-ui, sans-serif;
+
+  --blur-glass: 28px;
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+}

@@ -1,0 +1,12 @@
+node_modules/
+dist/
+src-tauri/target/
+src-tauri/gen/schemas/
+
+# 确定性生成的测试样本，用 npm run samples 重建
+tests/samples/*.wav
+
+*.log
+.DS_Store
+.idea/
+.vscode/
