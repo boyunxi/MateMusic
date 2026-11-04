@@ -1,0 +1,355 @@
+use std::fs::File;
+use std::io::ErrorKind;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use cpal::{FromSample, SampleFormat, SizedSample, StreamConfig};
+use symphonia::core::audio::SampleBuffer;
+use symphonia::core::codecs::DecoderOptions;
+use symphonia::core::errors::Error as SymphoniaError;
+use symphonia::core::formats::FormatOptions;
+use symphonia::core::io::MediaSourceStream;
+use symphonia::core::meta::MetadataOptions;
+use symphonia::core::probe::Hint;
+
+type Result<T> = std::result::Result<T, String>;
+
+struct Decoded {
+    interleaved: Vec<f32>,
+    sample_rate: u32,
+    channels: usize,
+    bits_per_sample: Option<u32>,
+    codec: String,
+    frames: u64,
+    peak: f32,
+}
+
+impl Decoded {
+    fn duration_secs(&self) -> f64 {
+        self.frames as f64 / self.sample_rate as f64
+    }
+}
+
+fn decode(path: &Path) -> Result<Decoded> {
+    let file = File::open(path).map_err(|e| format!("无法打开文件 {}: {e}", path.display()))?;
+    let mss = MediaSourceStream::new(Box::new(file), Default::default());
+
+    let mut hint = Hint::new();
+    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        hint.with_extension(ext);
+    }
+
+    let probed = symphonia::default::get_probe()
+        .format(
+            &hint,
+            mss,
+            &FormatOptions {
+                enable_gapless: true,
+                ..Default::default()
+            },
+            &MetadataOptions::default(),
+        )
+        .map_err(|e| format!("无法识别容器格式: {e}"))?;
+
+    let mut format = probed.format;
+    let track = format
+        .default_track()
+        .ok_or_else(|| "文件里没有可播放的默认音轨".to_string())?;
+    let track_id = track.id;
+    let params = track.codec_params.clone();
+
+    let codec = symphonia::default::get_codecs()
+        .get_codec(params.codec)
+        .map(|d| format!("{} ({})", d.short_name, d.long_name))
+        .unwrap_or_else(|| format!("codec#{}", params.codec));
+
+    let mut decoder = symphonia::default::get_codecs()
+        .make(&params, &DecoderOptions::default())
+        .map_err(|e| format!("无法创建解码器: {e}"))?;
+
+    let mut sample_buf: Option<SampleBuffer<f32>> = None;
+    let mut interleaved: Vec<f32> = Vec::new();
+    let mut sample_rate = params.sample_rate.unwrap_or(0);
+    let mut channels = params.channels.map(|c| c.count()).unwrap_or(0);
+    let mut peak = 0.0f32;
+
+    loop {
+        let packet = match format.next_packet() {
+            Ok(packet) => packet,
+            Err(SymphoniaError::IoError(e)) if e.kind() == ErrorKind::UnexpectedEof => break,
+            Err(SymphoniaError::ResetRequired) => break,
+            Err(e) => return Err(format!("读取数据包失败: {e}")),
+        };
+
+        if packet.track_id() != track_id {
+            continue;
+        }
+
+        match decoder.decode(&packet) {
+            Ok(audio_buf) => {
+                let spec = *audio_buf.spec();
+                sample_rate = spec.rate;
+                channels = spec.channels.count();
+
+                if sample_buf.is_none() {
+                    sample_buf = Some(SampleBuffer::<f32>::new(
+                        audio_buf.capacity() as u64,
+                        spec,
+                    ));
+                }
+                let sb = sample_buf.as_mut().expect("sample buffer initialized above");
+                sb.copy_interleaved_ref(audio_buf);
+
+                for &s in sb.samples() {
+                    peak = peak.max(s.abs());
+                    interleaved.push(s);
+                }
+            }
+            // 单包损坏不应中断整首曲目
+            Err(SymphoniaError::DecodeError(_)) => continue,
+            Err(SymphoniaError::IoError(e)) if e.kind() == ErrorKind::UnexpectedEof => break,
+            Err(e) => return Err(format!("解码失败: {e}")),
+        }
+    }
+
+    if channels == 0 || sample_rate == 0 {
+        return Err("解码结果缺少采样率或声道信息".to_string());
+    }
+
+    let frames = (interleaved.len() / channels) as u64;
+
+    Ok(Decoded {
+        interleaved,
+        sample_rate,
+        channels,
+        bits_per_sample: params.bits_per_sample,
+        codec,
+        frames,
+        peak,
+    })
+}
+
+fn probe(path: &Path) -> Result<()> {
+    let d = decode(path)?;
+    let peak_db = if d.peak > 0.0 {
+        20.0 * d.peak.log10()
+    } else {
+        f32::NEG_INFINITY
+    };
+
+    println!("file           {}", path.display());
+    println!("codec          {}", d.codec);
+    println!("sample rate    {} Hz", d.sample_rate);
+    println!("channels       {}", d.channels);
+    println!(
+        "bit depth      {}",
+        d.bits_per_sample
+            .map(|b| format!("{b} bit"))
+            .unwrap_or_else(|| "未知".to_string())
+    );
+    println!("duration       {:.3} s", d.duration_secs());
+    println!("decoded frames {}", d.frames);
+    println!("peak           {:.1} dBFS", peak_db);
+    Ok(())
+}
+
+struct PlaySource {
+    interleaved: Vec<f32>,
+    src_channels: usize,
+    src_rate: u32,
+    done: Arc<AtomicBool>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn mapped_sample(
+    src: &[f32],
+    src_channels: usize,
+    src_frames: usize,
+    frame_a: usize,
+    frame_b: usize,
+    out_channel: usize,
+    out_channels: usize,
+    frac: f32,
+) -> f32 {
+    let at = |frame: usize| -> f32 {
+        if frame >= src_frames {
+            return 0.0;
+        }
+        let base = frame * src_channels;
+        if src_channels == 1 {
+            return src[base];
+        }
+        if out_channels == 1 {
+            let sum: f32 = src[base..base + src_channels].iter().sum();
+            return sum / src_channels as f32;
+        }
+        if out_channel < src_channels {
+            src[base + out_channel]
+        } else {
+            0.0
+        }
+    };
+    let a = at(frame_a);
+    let b = at(frame_b);
+    a + (b - a) * frac
+}
+
+fn build_stream<T>(
+    device: &cpal::Device,
+    config: &StreamConfig,
+    sample_format: SampleFormat,
+    source: Arc<PlaySource>,
+) -> Result<cpal::Stream>
+where
+    T: SizedSample + FromSample<f32>,
+{
+    let out_channels = config.channels as usize;
+    let out_rate = config.sample_rate.0 as f64;
+    let ratio = source.src_rate as f64 / out_rate;
+    let src_frames = source.interleaved.len() / source.src_channels;
+    let mut pos = 0.0f64;
+
+    let err_source = source.clone();
+    let done = source.done.clone();
+
+    let stream = device
+        .build_output_stream(
+            config,
+            move |out: &mut [T], _| {
+                let frames = out.len() / out_channels.max(1);
+                for f in 0..frames {
+                    let frame_a = pos as usize;
+                    let frac = (pos - frame_a as f64) as f32;
+
+                    if frame_a >= src_frames {
+                        for c in 0..out_channels {
+                            out[f * out_channels + c] = T::from_sample(0.0f32);
+                        }
+                        done.store(true, Ordering::Relaxed);
+                        continue;
+                    }
+
+                    for c in 0..out_channels {
+                        let v = mapped_sample(
+                            &source.interleaved,
+                            source.src_channels,
+                            src_frames,
+                            frame_a,
+                            frame_a + 1,
+                            c,
+                            out_channels,
+                            frac,
+                        );
+                        out[f * out_channels + c] = T::from_sample(v);
+                    }
+                    pos += ratio;
+                }
+            },
+            move |err| {
+                eprintln!("输出流错误: {err}");
+                err_source.done.store(true, Ordering::Relaxed);
+            },
+            None,
+        )
+        .map_err(|e| format!("无法创建输出流 (格式 {sample_format:?}): {e}"))?;
+
+    stream.play().map_err(|e| format!("无法启动输出流: {e}"))?;
+    Ok(stream)
+}
+
+fn play(path: &Path) -> Result<()> {
+    let d = decode(path)?;
+    let seconds = d.duration_secs();
+
+    let host = cpal::default_host();
+    let device = host
+        .default_output_device()
+        .ok_or_else(|| "系统没有默认输出设备".to_string())?;
+    let device_name = device.name().unwrap_or_else(|_| "未知设备".to_string());
+    let supported = device
+        .default_output_config()
+        .map_err(|e| format!("无法获取默认输出格式: {e}"))?;
+
+    let sample_format = supported.sample_format();
+    let config: StreamConfig = supported.config();
+
+    println!("source         {} Hz / {} ch / {} bit", d.sample_rate, d.channels, d.bits_per_sample.map(|b| b.to_string()).unwrap_or_else(|| "?".into()));
+    println!("device         {device_name}");
+    println!(
+        "device format  {} Hz / {} ch / {:?}",
+        config.sample_rate.0, config.channels, sample_format
+    );
+    println!("mode           WASAPI 共享（非 Bit-Perfect，系统混音参与）");
+
+    if config.sample_rate.0 != d.sample_rate || config.channels as usize != d.channels {
+        println!(
+            "resample       linear {} Hz -> {} Hz / {} ch -> {} ch（spike 阶段临时实现）",
+            d.sample_rate, config.sample_rate.0, d.channels, config.channels
+        );
+    } else {
+        println!("resample       无（源格式与设备混音格式一致）");
+    }
+
+    let source = Arc::new(PlaySource {
+        interleaved: d.interleaved,
+        src_channels: d.channels,
+        src_rate: d.sample_rate,
+        done: Arc::new(AtomicBool::new(false)),
+    });
+
+    let stream = match sample_format {
+        SampleFormat::F32 => build_stream::<f32>(&device, &config, sample_format, source.clone())?,
+        SampleFormat::I16 => build_stream::<i16>(&device, &config, sample_format, source.clone())?,
+        SampleFormat::U16 => build_stream::<u16>(&device, &config, sample_format, source.clone())?,
+        SampleFormat::F64 => build_stream::<f64>(&device, &config, sample_format, source.clone())?,
+        SampleFormat::I32 => build_stream::<i32>(&device, &config, sample_format, source.clone())?,
+        other => return Err(format!("暂不支持设备采样格式 {other:?}")),
+    };
+
+    println!("playing        {:.3} s", seconds);
+    let deadline = std::time::Instant::now() + Duration::from_secs_f64(seconds + 1.0);
+    while std::time::Instant::now() < deadline && !source.done.load(Ordering::Relaxed) {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    drop(stream);
+
+    if source.done.load(Ordering::Relaxed) {
+        println!("done           播放结束");
+    } else {
+        println!("done           达到时长上限，已停止");
+    }
+    Ok(())
+}
+
+fn usage() -> ! {
+    eprintln!(
+        "MateMusic audio probe (M1 spike)\n\
+         \n\
+         USAGE:\n\
+         \x20 audio_probe probe <file>\n\
+         \x20 audio_probe play  <file>\n"
+    );
+    std::process::exit(2);
+}
+
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() < 3 {
+        usage();
+    }
+
+    let path = PathBuf::from(&args[2]);
+    let result = match args[1].as_str() {
+        "probe" => probe(&path),
+        "play" => play(&path),
+        _ => usage(),
+    };
+
+    if let Err(err) = result {
+        eprintln!("错误: {err}");
+        std::process::exit(1);
+    }
+}
