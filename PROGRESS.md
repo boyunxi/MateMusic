@@ -129,9 +129,11 @@
 | `3e5ec53` | `docs` | 建立全局规划与技术架构 `PLAN.md` |
 | `0de130e` | `docs` | 建立任务分解与实时进度 `PROGRESS.md` |
 | `efe4bbc` | `docs` | 回填 `PROGRESS.md` 提交记录 |
+| `6208686` | `docs` | 项目更名为 MateMusic |
+| `f3c4868` | `chore` | 初始化 Tauri 2 + React 工程骨架 |
+| `2ecc41f` | `feat(audio)` | Symphonia 解码与 WASAPI 共享输出验证 |
 
 > 提交纪律：每完成一个独立功能点，立即更新本文件并执行一次原子提交；禁止多个无关功能混合提交。
-> 本次「项目更名为 MateMusic」的提交 hash 以 `git log` 为准。
 
 ---
 
