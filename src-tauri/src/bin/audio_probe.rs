@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, SampleFormat, SizedSample, StreamConfig};
+use matemusic_lib::audio::AudioEngine;
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::DecoderOptions;
 use symphonia::core::errors::Error as SymphoniaError;
@@ -324,13 +325,85 @@ fn play(path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn engine_check(path: &Path) -> Result<()> {
+    let engine = AudioEngine::spawn(|snapshot| {
+        if let Some(err) = snapshot.error {
+            eprintln!("engine state error: {err}");
+        }
+    });
+
+    engine.set_volume(0.35);
+    engine.load(path.to_path_buf());
+    std::thread::sleep(Duration::from_millis(700));
+    let loaded = engine.snapshot();
+    println!(
+        "loaded={} playing={} pos={:.3} dur={:.3} codec={} {} Hz/{} ch out={}Hz/{}ch underruns={}",
+        loaded.loaded,
+        loaded.playing,
+        loaded.position,
+        loaded.duration,
+        loaded.codec,
+        loaded.sample_rate,
+        loaded.channels,
+        loaded.output_rate,
+        loaded.output_channels,
+        loaded.underruns
+    );
+    if !loaded.loaded {
+        return Err(loaded.error.unwrap_or_else(|| "加载失败".to_string()));
+    }
+    if (loaded.position - 0.7).abs() > 0.35 {
+        return Err(format!("播放位置异常: {:.3}s（期望约 0.7s）", loaded.position));
+    }
+
+    engine.pause();
+    std::thread::sleep(Duration::from_millis(350));
+    let paused = engine.snapshot();
+    println!("paused={} pos={:.3}", !paused.playing, paused.position);
+    if paused.playing {
+        return Err("暂停未生效".to_string());
+    }
+    if (paused.position - loaded.position).abs() > 0.15 {
+        return Err(format!(
+            "暂停后位置仍在前进: {:.3} -> {:.3}",
+            loaded.position, paused.position
+        ));
+    }
+
+    engine.seek(1.0);
+    std::thread::sleep(Duration::from_millis(300));
+    let sought = engine.snapshot();
+    println!("seek pos={:.3} playing={}", sought.position, sought.playing);
+    if (sought.position - 1.0).abs() > 0.15 {
+        return Err(format!("seek 位置异常: {:.3}s（期望约 1.0s）", sought.position));
+    }
+
+    engine.play();
+    std::thread::sleep(Duration::from_millis(350));
+    let resumed = engine.snapshot();
+    println!("resumed pos={:.3} playing={}", resumed.position, resumed.playing);
+    if !resumed.playing {
+        return Err("恢复播放失败".to_string());
+    }
+    if resumed.position <= sought.position + 0.1 {
+        return Err(format!(
+            "恢复播放后位置未推进: {:.3} -> {:.3}",
+            sought.position, resumed.position
+        ));
+    }
+
+    println!("engine check OK");
+    Ok(())
+}
+
 fn usage() -> ! {
     eprintln!(
         "MateMusic audio probe (M1 spike)\n\
          \n\
          USAGE:\n\
-         \x20 audio_probe probe <file>\n\
-         \x20 audio_probe play  <file>\n"
+         \x20 audio_probe probe  <file>\n\
+         \x20 audio_probe play   <file>\n\
+         \x20 audio_probe engine <file>   # 流式引擎：加载/暂停/seek/恢复自检\n"
     );
     std::process::exit(2);
 }
@@ -345,6 +418,7 @@ fn main() {
     let result = match args[1].as_str() {
         "probe" => probe(&path),
         "play" => play(&path),
+        "engine" => engine_check(&path),
         _ => usage(),
     };
 

@@ -398,6 +398,52 @@
   justify-content: space-between;
 }
 
+.head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.open-file {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 11px;
+  border: 1px solid var(--glass-border);
+  border-radius: 999px;
+  background: var(--tile);
+  color: var(--text);
+  font-size: 11px;
+  cursor: pointer;
+  transition:
+    background 200ms var(--ease-out),
+    color 200ms var(--ease-out);
+}
+
+.open-file:hover {
+  background: var(--tile-strong);
+  color: var(--text-strong);
+}
+
+.open-file:disabled {
+  opacity: 0.55;
+  cursor: progress;
+}
+
+.error-line {
+  margin: 10px 0 0;
+  padding: 8px 12px;
+  border: 1px solid rgba(255, 120, 120, 0.3);
+  border-radius: 10px;
+  background: rgba(255, 120, 120, 0.12);
+  color: #ffc9c9;
+  font-size: 11.5px;
+}
+
+.demo[data-theme="light"] .error-line {
+  color: #8b2436;
+}
+
 .eyebrow {
   margin: 0;
   font-size: 10.5px;
@@ -659,6 +705,16 @@
   color: #ff9db1;
 }
 
+.icon-button:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+
+.icon-button:disabled:hover {
+  background: transparent;
+  color: var(--text-faint);
+}
+
 /* ---------- 三段音频参数 ---------- */
 
 .audio-info {
@@ -750,6 +806,25 @@
   opacity: 1;
   transform: translateX(2px);
   text-shadow: 0 0 24px rgba(143, 227, 213, 0.22);
+}
+
+.lyric-placeholder {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 6px;
+  height: clamp(120px, 24vh, 190px);
+}
+
+.lyric-placeholder p {
+  margin: 0;
+  color: var(--text-faint);
+  font-size: 12.5px;
+}
+
+.lyric-placeholder p:first-child {
+  color: var(--text);
+  font-size: 14px;
 }
 
 /* ---------- 播放控制 ---------- */
@@ -893,6 +968,10 @@
 
 .queue-item:hover {
   background: var(--tile);
+}
+
+.queue-item.is-static {
+  cursor: default;
 }
 
 .queue-item.is-active {
