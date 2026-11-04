@@ -3,7 +3,7 @@ pub mod audio;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-use audio::{AudioEngine, PlayerSnapshot};
+use audio::{AudioEngine, OutputMode, PlayerSnapshot};
 use serde::Serialize;
 use tauri::{Emitter, Manager, State};
 
@@ -61,6 +61,15 @@ fn player_set_volume(state: State<'_, EngineState>, volume: f32) {
 }
 
 #[tauri::command]
+fn player_set_output_mode(state: State<'_, EngineState>, mode: String) -> Result<(), String> {
+    let mode = OutputMode::parse(&mode).ok_or_else(|| format!("未知输出模式: {mode}"))?;
+    if let Ok(engine) = state.0.lock() {
+        engine.set_output_mode(mode);
+    }
+    Ok(())
+}
+
+#[tauri::command]
 fn player_state(state: State<'_, EngineState>) -> PlayerSnapshot {
     state
         .0
@@ -88,6 +97,7 @@ pub fn run() {
             player_pause,
             player_seek,
             player_set_volume,
+            player_set_output_mode,
             player_state
         ])
         .run(tauri::generate_context!())

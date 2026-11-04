@@ -16,9 +16,11 @@ export type PlayerSnapshot = {
   outputMode: string;
   outputRate: number;
   outputChannels: number;
+  outputFormat: string;
   device: string;
   underruns: number;
   error: string | null;
+  note: string | null;
 };
 
 export const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -54,6 +56,8 @@ export const playTrack = () => invoke<void>("player_play");
 export const pauseTrack = () => invoke<void>("player_pause");
 export const seekTrack = (position: number) => invoke<void>("player_seek", { position });
 export const setTrackVolume = (volume: number) => invoke<void>("player_set_volume", { volume });
+export const setOutputMode = (mode: "exclusive" | "shared") =>
+  invoke<void>("player_set_output_mode", { mode });
 export const getPlayerState = () => invoke<PlayerSnapshot>("player_state");
 export const subscribePlayer = (onState: (state: PlayerSnapshot) => void) =>
   listen<PlayerSnapshot>("playback://state", (event) => onState(event.payload));

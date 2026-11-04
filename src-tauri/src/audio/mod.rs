@@ -1,3 +1,5 @@
+mod wasapi_exclusive;
+
 use std::fs::File;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -21,8 +23,26 @@ use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 use symphonia::core::units::Time;
 
+use wasapi_exclusive::ExclusiveHandle;
+
 const RING_SECONDS: usize = 2;
 const PREFETCH_THRESHOLD: usize = 16 * 1024;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OutputMode {
+    Exclusive,
+    Shared,
+}
+
+impl OutputMode {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "exclusive" => Some(Self::Exclusive),
+            "shared" => Some(Self::Shared),
+            _ => None,
+        }
+    }
+}
 
 #[derive(Clone, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -40,9 +60,11 @@ pub struct PlayerSnapshot {
     pub output_mode: String,
     pub output_rate: u32,
     pub output_channels: usize,
+    pub output_format: String,
     pub device: String,
     pub underruns: u64,
     pub error: Option<String>,
+    pub note: Option<String>,
 }
 
 #[derive(Default)]
@@ -58,17 +80,19 @@ struct Meta {
     output_mode: String,
     output_rate: u32,
     output_channels: usize,
+    output_format: String,
     device: String,
     error: Option<String>,
+    note: Option<String>,
 }
 
-struct Shared {
+pub(crate) struct Shared {
     meta: Mutex<Meta>,
-    playing: AtomicBool,
-    played_samples: AtomicU64,
+    pub(crate) playing: AtomicBool,
+    pub(crate) played_samples: AtomicU64,
     base_secs: AtomicU64,
-    volume_bits: AtomicU32,
-    underruns: AtomicU64,
+    pub(crate) volume_bits: AtomicU32,
+    pub(crate) underruns: AtomicU64,
 }
 
 impl Shared {
@@ -89,6 +113,19 @@ impl Shared {
 
     fn base(&self) -> f64 {
         f64::from_bits(self.base_secs.load(Ordering::Relaxed))
+    }
+
+    pub(crate) fn report_error(&self, message: String) {
+        eprintln!("audio error: {message}");
+        if let Ok(mut meta) = self.meta.lock() {
+            meta.error = Some(message);
+        }
+    }
+
+    fn report_note(&self, message: String) {
+        if let Ok(mut meta) = self.meta.lock() {
+            meta.note = Some(message);
+        }
     }
 
     fn snapshot(&self) -> PlayerSnapshot {
@@ -115,9 +152,11 @@ impl Shared {
             output_mode: meta.output_mode.clone(),
             output_rate: meta.output_rate,
             output_channels: meta.output_channels,
+            output_format: meta.output_format.clone(),
             device: meta.device.clone(),
             underruns: self.underruns.load(Ordering::Relaxed),
             error: meta.error.clone(),
+            note: meta.note.clone(),
         }
     }
 }
@@ -128,6 +167,7 @@ enum Command {
     Pause,
     Seek(f64),
     SetVolume(f32),
+    SetOutputMode(OutputMode),
 }
 
 pub struct AudioEngine {
@@ -172,9 +212,17 @@ impl AudioEngine {
         let _ = self.tx.send(Command::SetVolume(volume.clamp(0.0, 1.0)));
     }
 
+    pub fn set_output_mode(&self, mode: OutputMode) {
+        let _ = self.tx.send(Command::SetOutputMode(mode));
+    }
+
     pub fn snapshot(&self) -> PlayerSnapshot {
         self.shared.snapshot()
     }
+}
+
+pub fn diagnose_wasapi() -> Vec<String> {
+    wasapi_exclusive::diagnose()
 }
 
 struct TrackInfo {
@@ -235,7 +283,8 @@ impl LinearResampler {
 
             if !self.started {
                 for c in 0..self.out_channels {
-                    self.prev[c] = Self::map_channel(frame, self.src_channels, self.out_channels, c);
+                    self.prev[c] =
+                        Self::map_channel(frame, self.src_channels, self.out_channels, c);
                 }
                 self.started = true;
                 continue;
@@ -262,6 +311,9 @@ struct Session {
     format: Box<dyn FormatReader>,
     decoder: Box<dyn Decoder>,
     track_id: u32,
+    src_rate: u32,
+    src_channels: usize,
+    src_bits: Option<u32>,
     resampler: LinearResampler,
     sample_buf: Option<SampleBuffer<f32>>,
     sample_spec: Option<(u32, usize)>,
@@ -270,7 +322,7 @@ struct Session {
 }
 
 impl Session {
-    fn open(path: &Path, out_rate: u32, out_channels: usize) -> Result<(Self, TrackInfo), String> {
+    fn open(path: &Path) -> Result<(Self, TrackInfo), String> {
         let file =
             File::open(path).map_err(|e| format!("无法打开文件 {}: {e}", path.display()))?;
         let mss = MediaSourceStream::new(Box::new(file), Default::default());
@@ -328,11 +380,12 @@ impl Session {
             .unwrap_or("未知曲目")
             .to_string();
 
+        let bits = params.bits_per_sample;
         let info = TrackInfo {
             title,
             codec,
             sample_rate,
-            bits: params.bits_per_sample,
+            bits,
             channels,
             duration,
         };
@@ -341,7 +394,10 @@ impl Session {
             format,
             decoder,
             track_id,
-            resampler: LinearResampler::new(sample_rate, channels, out_rate, out_channels),
+            src_rate: sample_rate,
+            src_channels: channels,
+            src_bits: bits,
+            resampler: LinearResampler::new(sample_rate, channels, sample_rate, channels),
             sample_buf: None,
             sample_spec: None,
             pending: Vec::new(),
@@ -349,6 +405,12 @@ impl Session {
         };
 
         Ok((session, info))
+    }
+
+    fn configure_output(&mut self, out_rate: u32, out_channels: usize) {
+        self.resampler =
+            LinearResampler::new(self.src_rate, self.src_channels, out_rate, out_channels);
+        self.pending.clear();
     }
 
     fn seek(&mut self, secs: f64) -> Result<(), String> {
@@ -410,7 +472,10 @@ impl Session {
                     self.sample_buf = Some(SampleBuffer::<f32>::new(need as u64, spec));
                     self.sample_spec = Some((spec.rate, spec.channels.count()));
                 }
-                let buf = self.sample_buf.as_mut().expect("sample buffer initialized above");
+                let buf = self
+                    .sample_buf
+                    .as_mut()
+                    .expect("sample buffer initialized above");
                 buf.copy_interleaved_ref(audio_buf);
                 self.resampler.process(buf.samples(), &mut self.pending);
             }
@@ -422,13 +487,6 @@ impl Session {
         }
 
         Ok(())
-    }
-}
-
-fn set_error(shared: &Shared, message: String) {
-    eprintln!("audio error: {message}");
-    if let Ok(mut meta) = shared.meta.lock() {
-        meta.error = Some(message);
     }
 }
 
@@ -487,45 +545,125 @@ where
                 }
             },
             move |err| {
-                eprintln!("audio stream error: {err}");
-                if let Ok(mut meta) = err_shared.meta.lock() {
-                    meta.error = Some(format!("输出流错误: {err}"));
-                }
+                err_shared.report_error(format!("共享输出流错误: {err}"));
             },
             None,
         )
-        .map_err(|e| format!("无法创建输出流: {e}"))
+        .map_err(|e| format!("无法创建共享输出流: {e}"))
 }
 
-struct Output {
-    producer: HeapProd<f32>,
-    _stream: cpal::Stream,
-}
-
-fn create_output(
-    device: &cpal::Device,
-    config: &StreamConfig,
+struct DeviceSetup {
+    device: cpal::Device,
+    config: StreamConfig,
     sample_format: SampleFormat,
-    shared: Arc<Shared>,
-) -> Result<Output, String> {
-    let capacity = (config.sample_rate.0 as usize * config.channels as usize * RING_SECONDS)
-        .max(8192);
-    let ring = HeapRb::<f32>::new(capacity);
-    let (producer, consumer) = ring.split();
+}
 
-    let stream = match sample_format {
-        SampleFormat::F32 => build_stream::<f32>(device, config, consumer, shared)?,
-        SampleFormat::I16 => build_stream::<i16>(device, config, consumer, shared)?,
-        SampleFormat::U16 => build_stream::<u16>(device, config, consumer, shared)?,
-        SampleFormat::F64 => build_stream::<f64>(device, config, consumer, shared)?,
-        SampleFormat::I32 => build_stream::<i32>(device, config, consumer, shared)?,
+struct ActiveOutput {
+    producer: HeapProd<f32>,
+    mode: OutputMode,
+    _backend: Backend,
+}
+
+enum Backend {
+    Shared { _stream: cpal::Stream },
+    Exclusive { _handle: ExclusiveHandle },
+}
+
+fn make_ring(rate: u32, channels: usize) -> (HeapProd<f32>, HeapCons<f32>) {
+    let capacity = (rate as usize * channels.max(1) * RING_SECONDS).max(8192);
+    HeapRb::<f32>::new(capacity).split()
+}
+
+fn sample_format_label(format: SampleFormat) -> &'static str {
+    match format {
+        SampleFormat::F32 => "32 bit float",
+        SampleFormat::F64 => "64 bit float",
+        SampleFormat::I16 | SampleFormat::U16 => "16 bit",
+        SampleFormat::I32 | SampleFormat::U32 => "32 bit",
+        _ => "未知格式",
+    }
+}
+
+fn create_active_output(
+    pref: OutputMode,
+    session: &mut Session,
+    shared: &Arc<Shared>,
+    setup: &DeviceSetup,
+) -> Result<ActiveOutput, String> {
+    if pref == OutputMode::Exclusive {
+        let (producer, consumer) = make_ring(session.src_rate, session.src_channels);
+        match wasapi_exclusive::spawn(
+            session.src_rate,
+            session.src_channels,
+            session.src_bits,
+            consumer,
+            Arc::clone(shared),
+        ) {
+            Ok((handle, negotiated)) => {
+                session.configure_output(negotiated.rate, negotiated.channels);
+                if let Ok(mut meta) = shared.meta.lock() {
+                    meta.output_mode = "WASAPI 独占".to_string();
+                    meta.output_rate = negotiated.rate;
+                    meta.output_channels = negotiated.channels;
+                    meta.output_format = negotiated.encoding.label().to_string();
+                }
+                eprintln!(
+                    "audio output: exclusive {} Hz / {} ch / {}",
+                    negotiated.rate,
+                    negotiated.channels,
+                    negotiated.encoding.label()
+                );
+                return Ok(ActiveOutput {
+                    producer,
+                    mode: OutputMode::Exclusive,
+                    _backend: Backend::Exclusive { _handle: handle },
+                });
+            }
+            Err(e) => {
+                eprintln!("audio output: 独占不可用，回退共享模式：{e}");
+                shared.report_note("独占不可用，已回退 WASAPI 共享".to_string());
+            }
+        }
+    }
+
+    let mix_rate = setup.config.sample_rate.0;
+    let mix_channels = setup.config.channels as usize;
+    session.configure_output(mix_rate, mix_channels);
+    let (producer, consumer) = make_ring(mix_rate, mix_channels);
+
+    let stream = match setup.sample_format {
+        SampleFormat::F32 => {
+            build_stream::<f32>(&setup.device, &setup.config, consumer, Arc::clone(shared))?
+        }
+        SampleFormat::I16 => {
+            build_stream::<i16>(&setup.device, &setup.config, consumer, Arc::clone(shared))?
+        }
+        SampleFormat::U16 => {
+            build_stream::<u16>(&setup.device, &setup.config, consumer, Arc::clone(shared))?
+        }
+        SampleFormat::F64 => {
+            build_stream::<f64>(&setup.device, &setup.config, consumer, Arc::clone(shared))?
+        }
+        SampleFormat::I32 => {
+            build_stream::<i32>(&setup.device, &setup.config, consumer, Arc::clone(shared))?
+        }
         other => return Err(format!("暂不支持设备采样格式 {other:?}")),
     };
+    stream
+        .play()
+        .map_err(|e| format!("无法启动输出流: {e}"))?;
 
-    stream.play().map_err(|e| format!("无法启动输出流: {e}"))?;
-    Ok(Output {
+    if let Ok(mut meta) = shared.meta.lock() {
+        meta.output_mode = "WASAPI 共享".to_string();
+        meta.output_rate = mix_rate;
+        meta.output_channels = mix_channels;
+        meta.output_format = sample_format_label(setup.sample_format).to_string();
+    }
+
+    Ok(ActiveOutput {
         producer,
-        _stream: stream,
+        mode: OutputMode::Shared,
+        _backend: Backend::Shared { _stream: stream },
     })
 }
 
@@ -540,33 +678,34 @@ where
                 let config: StreamConfig = supported.config();
                 let sample_format = supported.sample_format();
                 let device_name = device.name().unwrap_or_else(|_| "未知设备".to_string());
-                {
-                    let mut meta = shared.meta.lock().expect("player meta poisoned");
+                if let Ok(mut meta) = shared.meta.lock() {
                     meta.device = device_name;
-                    meta.output_mode = "WASAPI 共享".to_string();
                     meta.output_rate = config.sample_rate.0;
                     meta.output_channels = config.channels as usize;
+                    meta.output_format = sample_format_label(sample_format).to_string();
                 }
-                Some((device, config, sample_format))
+                Some(DeviceSetup {
+                    device,
+                    config,
+                    sample_format,
+                })
             }
             Err(e) => {
-                set_error(&shared, format!("无法获取默认输出格式: {e}"));
+                shared.report_error(format!("无法获取默认输出格式: {e}"));
                 None
             }
         },
         None => {
-            set_error(&shared, "系统没有默认输出设备".to_string());
+            shared.report_error("系统没有默认输出设备".to_string());
             None
         }
     };
 
-    let (out_rate, out_channels) = setup
-        .as_ref()
-        .map(|(_, config, _)| (config.sample_rate.0, config.channels as usize))
-        .unwrap_or((48000, 2));
-
     let mut session: Option<Session> = None;
-    let mut output: Option<Output> = None;
+    let mut output: Option<ActiveOutput> = None;
+    let mut preferred_mode = OutputMode::Exclusive;
+    let mut force_shared = false;
+    let mut exclusive_guard: Option<(Instant, f64)> = None;
     let mut last_emit = Instant::now() - Duration::from_secs(1);
 
     loop {
@@ -578,12 +717,14 @@ where
                 Command::Load(path) => {
                     shared.playing.store(false, Ordering::Relaxed);
                     output = None;
+                    force_shared = false;
+                    exclusive_guard = None;
                     shared.played_samples.store(0, Ordering::Relaxed);
                     shared.set_base(0.0);
                     session = None;
 
-                    match Session::open(&path, out_rate, out_channels) {
-                        Ok((new_session, info)) => {
+                    match Session::open(&path) {
+                        Ok((mut new_session, info)) => {
                             if let Ok(mut meta) = shared.meta.lock() {
                                 meta.loaded = true;
                                 meta.title = info.title;
@@ -594,25 +735,37 @@ where
                                 meta.channels = info.channels;
                                 meta.duration = info.duration;
                                 meta.error = None;
+                                meta.note = None;
                             }
-                            session = Some(new_session);
 
-                            if let Some((device, config, format)) = setup.as_ref() {
-                                match create_output(
-                                    device,
-                                    config,
-                                    *format,
-                                    Arc::clone(&shared),
+                            let effective_mode = if force_shared {
+                                OutputMode::Shared
+                            } else {
+                                preferred_mode
+                            };
+                            match setup.as_ref() {
+                                Some(device_setup) => match create_active_output(
+                                    effective_mode,
+                                    &mut new_session,
+                                    &shared,
+                                    device_setup,
                                 ) {
                                     Ok(new_output) => {
+                                        if new_output.mode == OutputMode::Exclusive {
+                                            exclusive_guard =
+                                                Some((Instant::now(), shared.snapshot().position));
+                                        }
                                         output = Some(new_output);
                                         shared.playing.store(true, Ordering::Relaxed);
                                     }
-                                    Err(e) => set_error(&shared, e),
+                                    Err(e) => shared.report_error(e),
+                                },
+                                None => {
+                                    shared.report_error("没有可用的输出设备".to_string())
                                 }
-                            } else {
-                                set_error(&shared, "没有可用的输出设备".to_string());
                             }
+
+                            session = Some(new_session);
                         }
                         Err(e) => {
                             if let Ok(mut meta) = shared.meta.lock() {
@@ -621,7 +774,7 @@ where
                                 meta.path.clear();
                                 meta.error = Some(e.clone());
                             }
-                            set_error(&shared, e);
+                            shared.report_error(e);
                         }
                     }
                 }
@@ -639,17 +792,32 @@ where
                             && snap.position >= snap.duration - 0.1
                     };
                     if at_end {
-                        if let Some(s) = session.as_mut() {
+                        if let (Some(s), Some(device_setup)) =
+                            (session.as_mut(), setup.as_ref())
+                        {
                             if s.seek(0.0).is_ok() {
                                 shared.played_samples.store(0, Ordering::Relaxed);
                                 shared.set_base(0.0);
                                 output = None;
-                                if let Some((device, config, format)) = setup.as_ref() {
-                                    if let Ok(new_output) =
-                                        create_output(device, config, *format, Arc::clone(&shared))
-                                    {
+                                let effective_mode = if force_shared {
+                                    OutputMode::Shared
+                                } else {
+                                    preferred_mode
+                                };
+                                match create_active_output(
+                                    effective_mode,
+                                    s,
+                                    &shared,
+                                    device_setup,
+                                ) {
+                                    Ok(new_output) => {
+                                        if new_output.mode == OutputMode::Exclusive {
+                                            exclusive_guard =
+                                                Some((Instant::now(), shared.snapshot().position));
+                                        }
                                         output = Some(new_output);
                                     }
+                                    Err(e) => shared.report_error(e),
                                 }
                             }
                         }
@@ -660,7 +828,7 @@ where
                 }
                 Command::Pause => shared.playing.store(false, Ordering::Relaxed),
                 Command::Seek(secs) => {
-                    if let Some(s) = session.as_mut() {
+                    if let (Some(s), Some(device_setup)) = (session.as_mut(), setup.as_ref()) {
                         let was_playing = shared.playing.load(Ordering::Relaxed);
                         shared.playing.store(false, Ordering::Relaxed);
                         match s.seek(secs) {
@@ -668,24 +836,30 @@ where
                                 shared.played_samples.store(0, Ordering::Relaxed);
                                 shared.set_base(secs.max(0.0));
                                 output = None;
-                                if let Some((device, config, format)) = setup.as_ref() {
-                                    match create_output(
-                                        device,
-                                        config,
-                                        *format,
-                                        Arc::clone(&shared),
-                                    ) {
-                                        Ok(new_output) => {
-                                            output = Some(new_output);
-                                            shared
-                                                .playing
-                                                .store(was_playing, Ordering::Relaxed);
+                                exclusive_guard = None;
+                                let effective_mode = if force_shared {
+                                    OutputMode::Shared
+                                } else {
+                                    preferred_mode
+                                };
+                                match create_active_output(
+                                    effective_mode,
+                                    s,
+                                    &shared,
+                                    device_setup,
+                                ) {
+                                    Ok(new_output) => {
+                                        if new_output.mode == OutputMode::Exclusive {
+                                            exclusive_guard =
+                                                Some((Instant::now(), shared.snapshot().position));
                                         }
-                                        Err(e) => set_error(&shared, e),
+                                        output = Some(new_output);
+                                        shared.playing.store(was_playing, Ordering::Relaxed);
                                     }
+                                    Err(e) => shared.report_error(e),
                                 }
                             }
-                            Err(e) => set_error(&shared, e),
+                            Err(e) => shared.report_error(e),
                         }
                     }
                 }
@@ -693,6 +867,72 @@ where
                     shared
                         .volume_bits
                         .store(volume.to_bits(), Ordering::Relaxed);
+                }
+                Command::SetOutputMode(mode) => {
+                    preferred_mode = mode;
+                    force_shared = mode == OutputMode::Shared;
+                    exclusive_guard = None;
+                    if let (Some(s), Some(device_setup)) = (session.as_mut(), setup.as_ref()) {
+                        let snap = shared.snapshot();
+                        let was_playing = shared.playing.load(Ordering::Relaxed);
+                        shared.playing.store(false, Ordering::Relaxed);
+                        if s.seek(snap.position).is_ok() {
+                            shared.played_samples.store(0, Ordering::Relaxed);
+                            shared.set_base(snap.position);
+                            output = None;
+                            match create_active_output(preferred_mode, s, &shared, device_setup)
+                            {
+                                Ok(new_output) => {
+                                    if new_output.mode == OutputMode::Exclusive {
+                                        exclusive_guard =
+                                            Some((Instant::now(), shared.snapshot().position));
+                                    }
+                                    output = Some(new_output);
+                                    shared.playing.store(was_playing, Ordering::Relaxed);
+                                }
+                                Err(e) => shared.report_error(e),
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 独占先尝试，若 900ms 内位置几乎没推进，判断为驱动不可用并回退共享
+        if let Some((started_at, base_position)) = exclusive_guard {
+            if started_at.elapsed() >= Duration::from_millis(900) {
+                let snap = shared.snapshot();
+                let advanced = snap.position - base_position;
+                if snap.playing && advanced < 0.2 {
+                    force_shared = true;
+                    exclusive_guard = None;
+                    if let (Some(s), Some(device_setup)) = (session.as_mut(), setup.as_ref()) {
+                        let pos = snap.position;
+                        let was_playing = shared.playing.load(Ordering::Relaxed);
+                        shared.playing.store(false, Ordering::Relaxed);
+                        if s.seek(pos).is_ok() {
+                            shared.played_samples.store(0, Ordering::Relaxed);
+                            shared.set_base(pos);
+                            output = None;
+                            match create_active_output(
+                                OutputMode::Shared,
+                                s,
+                                &shared,
+                                device_setup,
+                            ) {
+                                Ok(new_output) => {
+                                    output = Some(new_output);
+                                    shared.playing.store(was_playing, Ordering::Relaxed);
+                                }
+                                Err(e) => shared.report_error(e),
+                            }
+                            shared.report_note(
+                                "独占输出未推进，已回退 WASAPI 共享".to_string(),
+                            );
+                        }
+                    }
+                } else {
+                    exclusive_guard = None;
                 }
             }
         }
@@ -712,7 +952,7 @@ where
                 && free >= PREFETCH_THRESHOLD
             {
                 if let Err(e) = session.decode_next() {
-                    set_error(&shared, e);
+                    shared.report_error(e);
                     session.finished = true;
                 }
             }
@@ -723,11 +963,7 @@ where
                 && shared.playing.load(Ordering::Relaxed)
             {
                 shared.playing.store(false, Ordering::Relaxed);
-                let duration = shared
-                    .meta
-                    .lock()
-                    .map(|m| m.duration)
-                    .unwrap_or(0.0);
+                let duration = shared.meta.lock().map(|m| m.duration).unwrap_or(0.0);
                 shared.set_base(duration);
                 shared.played_samples.store(0, Ordering::Relaxed);
             }

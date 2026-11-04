@@ -29,6 +29,7 @@ import {
   pickAudioFile,
   playTrack,
   seekTrack,
+  setOutputMode,
   setTrackVolume,
   subscribePlayer,
 } from "../../lib/player";
@@ -154,6 +155,7 @@ export default function GlassDemo() {
   const [snapshot, setSnapshot] = useState<PlayerSnapshot | null>(null);
   const [opening, setOpening] = useState(false);
   const [bridgeError, setBridgeError] = useState<string | null>(null);
+  const [outputPreference, setOutputPreference] = useState<"exclusive" | "shared">("exclusive");
 
   const track = TRACKS[index];
   const loaded = snapshot?.loaded ? snapshot : null;
@@ -278,6 +280,11 @@ export default function GlassDemo() {
     if (loaded) void setTrackVolume(value);
   };
 
+  const changeOutputMode = (mode: "exclusive" | "shared") => {
+    setOutputPreference(mode);
+    if (loaded) void setOutputMode(mode);
+  };
+
   const handleOpen = async () => {
     if (!inTauri) return;
     setOpening(true);
@@ -358,7 +365,28 @@ export default function GlassDemo() {
                 aria-label="玻璃模糊强度"
               />
             </label>
-            <p className="tuning-note">{real ? "真实播放 · WASAPI 共享" : "演示模式 · 未接入音频"}</p>
+            <p className="tuning-title is-spaced">输出模式</p>
+            <div className="segmented" role="group" aria-label="输出模式">
+              <button
+                type="button"
+                className={outputPreference === "exclusive" ? "is-active" : ""}
+                onClick={() => changeOutputMode("exclusive")}
+                aria-pressed={outputPreference === "exclusive"}
+              >
+                独占优先
+              </button>
+              <button
+                type="button"
+                className={outputPreference === "shared" ? "is-active" : ""}
+                onClick={() => changeOutputMode("shared")}
+                aria-pressed={outputPreference === "shared"}
+              >
+                共享
+              </button>
+            </div>
+            <p className="tuning-note">
+              {loaded ? `${loaded.outputMode} · ${loaded.outputFormat}` : "演示模式 · 未接入音频"}
+            </p>
           </section>
         </aside>
 
@@ -382,6 +410,7 @@ export default function GlassDemo() {
           </header>
 
           {errorText && <p className="error-line">{errorText}</p>}
+          {loaded?.note && <p className="note-line">{loaded.note}</p>}
 
           <section className="hero">
             <motion.div
@@ -444,9 +473,9 @@ export default function GlassDemo() {
             </div>
             <div>
               <span>输出</span>
-              <strong>
+              <strong title={loaded ? `${loaded.outputMode} · ${formatHz(loaded.outputRate)} · ${loaded.outputFormat}` : undefined}>
                 {loaded
-                  ? `${loaded.outputMode} · ${formatHz(loaded.outputRate)}`
+                  ? `${loaded.outputMode} · ${formatHz(loaded.outputRate)} · ${loaded.outputFormat}`
                   : "WASAPI 独占 · 96 kHz"}
               </strong>
             </div>

@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, SampleFormat, SizedSample, StreamConfig};
-use matemusic_lib::audio::AudioEngine;
+use matemusic_lib::audio::{AudioEngine, OutputMode};
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::DecoderOptions;
 use symphonia::core::errors::Error as SymphoniaError;
@@ -334,10 +334,10 @@ fn engine_check(path: &Path) -> Result<()> {
 
     engine.set_volume(0.35);
     engine.load(path.to_path_buf());
-    std::thread::sleep(Duration::from_millis(700));
+    std::thread::sleep(Duration::from_millis(1700));
     let loaded = engine.snapshot();
     println!(
-        "loaded={} playing={} pos={:.3} dur={:.3} codec={} {} Hz/{} ch out={}Hz/{}ch underruns={}",
+        "loaded={} playing={} pos={:.3} dur={:.3} codec={} {} Hz/{} ch mode={} out={}Hz/{}ch/{} underruns={} note={:?}",
         loaded.loaded,
         loaded.playing,
         loaded.position,
@@ -345,15 +345,21 @@ fn engine_check(path: &Path) -> Result<()> {
         loaded.codec,
         loaded.sample_rate,
         loaded.channels,
+        loaded.output_mode,
         loaded.output_rate,
         loaded.output_channels,
-        loaded.underruns
+        loaded.output_format,
+        loaded.underruns,
+        loaded.note
     );
     if !loaded.loaded {
         return Err(loaded.error.unwrap_or_else(|| "加载失败".to_string()));
     }
-    if (loaded.position - 0.7).abs() > 0.35 {
-        return Err(format!("播放位置异常: {:.3}s（期望约 0.7s）", loaded.position));
+    if loaded.position < 0.4 {
+        return Err(format!(
+            "播放位置异常: {:.3}s（独占回退后应已推进）",
+            loaded.position
+        ));
     }
 
     engine.pause();
@@ -392,7 +398,47 @@ fn engine_check(path: &Path) -> Result<()> {
         ));
     }
 
+    engine.set_output_mode(OutputMode::Shared);
+    std::thread::sleep(Duration::from_millis(500));
+    let shared = engine.snapshot();
+    println!(
+        "switch shared: mode={} out={}Hz/{}ch/{} playing={} pos={:.3}",
+        shared.output_mode,
+        shared.output_rate,
+        shared.output_channels,
+        shared.output_format,
+        shared.playing,
+        shared.position
+    );
+    if !shared.output_mode.contains("共享") {
+        return Err(format!("切换到共享模式失败: {}", shared.output_mode));
+    }
+    if !shared.playing || shared.position <= resumed.position {
+        return Err("切换输出模式后播放未继续".to_string());
+    }
+
+    engine.set_output_mode(OutputMode::Exclusive);
+    std::thread::sleep(Duration::from_millis(1200));
+    let exclusive_again = engine.snapshot();
+    println!(
+        "switch exclusive: mode={} out={}Hz/{}ch/{} playing={} pos={:.3} note={:?}",
+        exclusive_again.output_mode,
+        exclusive_again.output_rate,
+        exclusive_again.output_channels,
+        exclusive_again.output_format,
+        exclusive_again.playing,
+        exclusive_again.position,
+        exclusive_again.note
+    );
+
     println!("engine check OK");
+    Ok(())
+}
+
+fn wasapi_check() -> Result<()> {
+    for line in matemusic_lib::audio::diagnose_wasapi() {
+        println!("{line}");
+    }
     Ok(())
 }
 
@@ -403,13 +449,21 @@ fn usage() -> ! {
          USAGE:\n\
          \x20 audio_probe probe  <file>\n\
          \x20 audio_probe play   <file>\n\
-         \x20 audio_probe engine <file>   # 流式引擎：加载/暂停/seek/恢复自检\n"
+         \x20 audio_probe engine <file>   # 流式引擎：加载/暂停/seek/恢复自检\n\
+         \x20 audio_probe wasapi          # WASAPI 共享/独占格式能力诊断\n"
     );
     std::process::exit(2);
 }
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if args.len() >= 2 && args[1] == "wasapi" {
+        if let Err(err) = wasapi_check() {
+            eprintln!("错误: {err}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if args.len() < 3 {
         usage();
     }

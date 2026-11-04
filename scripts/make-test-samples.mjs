@@ -1,6 +1,8 @@
 import { mkdirSync, writeFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
 // 生成确定性测试样本：不提交二进制，随时可重建
+const OUT_DIR = fileURLToPath(new URL("../tests/samples/", import.meta.url));
 const FADE = 0.01;
 
 function writeWav(path, { rate, bits, seconds, channels }) {
@@ -49,6 +51,6 @@ function writeWav(path, { rate, bits, seconds, channels }) {
   console.log(`${path}  ${rate} Hz / ${bits} bit / ${channels} ch / ${seconds}s`);
 }
 
-mkdirSync("tests/samples", { recursive: true });
-writeWav("tests/samples/tone-44100-16.wav", { rate: 44100, bits: 16, seconds: 2, channels: 2 });
-writeWav("tests/samples/tone-96000-24.wav", { rate: 96000, bits: 24, seconds: 1.5, channels: 2 });
+mkdirSync(OUT_DIR, { recursive: true });
+writeWav(`${OUT_DIR}tone-44100-16.wav`, { rate: 44100, bits: 16, seconds: 4, channels: 2 });
+writeWav(`${OUT_DIR}tone-96000-24.wav`, { rate: 96000, bits: 24, seconds: 3, channels: 2 });
