@@ -132,6 +132,7 @@
 | `6208686` | `docs` | 项目更名为 MateMusic |
 | `f3c4868` | `chore` | 初始化 Tauri 2 + React 工程骨架 |
 | `2ecc41f` | `feat(audio)` | Symphonia 解码与 WASAPI 共享输出验证 |
+| `101a8ca` | `feat(ui)` | 玻璃质感沉浸播放页 demo |
 
 > 提交纪律：每完成一个独立功能点，立即更新本文件并执行一次原子提交；禁止多个无关功能混合提交。
 
