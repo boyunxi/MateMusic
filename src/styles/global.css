@@ -10,11 +10,8 @@ body,
 }
 
 body {
-  background:
-    radial-gradient(1200px 700px at 12% -10%, rgba(127, 209, 196, 0.12), transparent 60%),
-    radial-gradient(900px 600px at 100% 100%, rgba(96, 128, 255, 0.1), transparent 55%),
-    var(--bg-base);
-  color: var(--text-primary);
+  background: #05070c;
+  color: #eef3fa;
   font-family: var(--font-ui);
   font-size: 14px;
   line-height: 1.55;
@@ -22,115 +19,12 @@ body {
   user-select: none;
 }
 
-.shell {
-  display: grid;
-  grid-template-columns: 212px minmax(0, 1fr);
-  height: 100%;
+button {
+  font-family: inherit;
 }
 
-.rail {
-  display: flex;
-  flex-direction: column;
-  gap: 28px;
-  padding: 28px 18px;
-  border-right: 1px solid var(--border-soft);
-  background: rgba(255, 255, 255, 0.02);
-  backdrop-filter: blur(var(--blur-glass));
-}
-
-.wordmark {
-  font-family: var(--font-display);
-  font-size: 17px;
-  font-weight: 600;
-  letter-spacing: 0.02em;
-  padding-left: 10px;
-}
-
-.rail-nav {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.nav-item {
-  padding: 8px 10px;
-  border-radius: var(--radius-sm);
-  color: var(--text-tertiary);
-}
-
-.nav-item:first-child {
-  color: var(--text-primary);
-  background: var(--bg-raised);
-}
-
-.stage {
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  gap: 44px;
-  padding: 64px clamp(32px, 7vw, 96px);
-  max-width: 880px;
-}
-
-.eyebrow {
-  margin: 0 0 12px;
-  font-size: 12px;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  color: var(--accent);
-}
-
-h1 {
-  margin: 0;
-  font-family: var(--font-display);
-  font-size: clamp(28px, 3.4vw, 42px);
-  font-weight: 600;
-  letter-spacing: -0.015em;
-}
-
-.lede {
-  margin: 18px 0 0;
-  max-width: 56ch;
-  color: var(--text-secondary);
-}
-
-.milestones {
-  display: grid;
-  gap: 8px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.milestone {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  padding: 13px 16px;
-  border: 1px solid var(--border-soft);
-  border-radius: var(--radius-md);
-  background: var(--bg-raised);
-  color: var(--text-tertiary);
-}
-
-.milestone-id {
-  font-variant-numeric: tabular-nums;
-  font-size: 12px;
-  letter-spacing: 0.08em;
-}
-
-.milestone.is-done {
-  color: var(--text-secondary);
-}
-
-.milestone.is-active {
-  color: var(--text-primary);
-  border-color: rgba(127, 209, 196, 0.34);
-  background: var(--accent-dim);
-}
-
-@media (prefers-reduced-motion: no-preference) {
-  .milestone.is-active {
-    transition: background 240ms var(--ease-out), border-color 240ms var(--ease-out);
-  }
+button:focus-visible,
+input:focus-visible {
+  outline: 2px solid rgba(143, 227, 213, 0.7);
+  outline-offset: 2px;
 }
