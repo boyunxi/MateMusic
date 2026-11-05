@@ -20,6 +20,7 @@ export type PlayerSnapshot = {
   device: string;
   underruns: number;
   finished: boolean;
+  segmentStart: number;
   error: string | null;
   note: string | null;
 };
@@ -61,6 +62,15 @@ export const loadTrack = (
     path,
     start: start ?? null,
     end: end ?? null,
+  });
+
+export const setPlayerNext = (
+  next: { path: string; start?: number | null; end?: number | null } | null,
+) =>
+  invoke<void>("player_set_next", {
+    path: next?.path ?? null,
+    start: next?.start ?? null,
+    end: next?.end ?? null,
   });
 export const playTrack = () => invoke<void>("player_play");
 export const pauseTrack = () => invoke<void>("player_pause");

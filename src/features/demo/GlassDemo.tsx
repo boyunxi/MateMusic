@@ -45,6 +45,7 @@ import {
   playTrack,
   seekTrack,
   setOutputMode,
+  setPlayerNext,
   setTrackVolume,
   subscribePlayer,
 } from "../../lib/player";
@@ -234,6 +235,7 @@ export default function GlassDemo() {
   const [lyricsError, setLyricsError] = useState<string | null>(null);
   const [manualLyricOffset, setManualLyricOffset] = useState(0);
   const lyricOffsetsRef = useRef<Record<string, number>>({});
+  const [nextRefresh, setNextRefresh] = useState(0);
   const [theme, setTheme] = useState<"dark" | "light">(() =>
     new URLSearchParams(window.location.search).get("theme") === "light" ? "light" : "dark",
   );
@@ -258,6 +260,7 @@ export default function GlassDemo() {
   const nextTrack = useAppStore((state) => state.next);
   const prevTrack = useAppStore((state) => state.prev);
   const moveQueue = useAppStore((state) => state.move);
+  const syncCurrent = useAppStore((state) => state.syncCurrent);
   const pushToast = useToastStore((state) => state.push);
   const updateToast = useToastStore((state) => state.update);
   const sensors = useSensors(
@@ -273,9 +276,21 @@ export default function GlassDemo() {
 
   const currentQueueTrack = currentIndex >= 0 ? queue[currentIndex] ?? null : null;
   const queueTrack =
-    loaded && currentQueueTrack && currentQueueTrack.path === loaded.path
+    loaded &&
+    currentQueueTrack &&
+    currentQueueTrack.path === loaded.path &&
+    Math.abs((currentQueueTrack.cueStart ?? 0) - loaded.segmentStart) < 0.05
       ? currentQueueTrack
       : null;
+  const queueAligned = loaded !== null && queueTrack !== null;
+  const nextIndex = useMemo(() => {
+    if (!queue.length || currentIndex < 0) return null;
+    if (playMode === "repeat-one") return currentIndex;
+    if (playMode === "shuffle") return null;
+    if (currentIndex + 1 < queue.length) return currentIndex + 1;
+    if (playMode === "repeat-all") return 0;
+    return null;
+  }, [queue, currentIndex, playMode]);
 
   const displayCodec = queueTrack?.codec ?? loaded?.codec;
   const displayBits = queueTrack?.bits ?? loaded?.bits;
@@ -572,12 +587,49 @@ export default function GlassDemo() {
   }, [snapshot?.finished]);
 
   useEffect(() => {
-    if (!loaded || !snapshot?.finished) return;
-    const key = `${snapshot.path}:${snapshot.duration}`;
+    if (!loaded || !queueAligned || !snapshot?.finished) return;
+    const key = `${snapshot.path}:${snapshot.segmentStart}:${snapshot.duration}`;
     if (finishedRef.current === key) return;
     finishedRef.current = key;
     nextTrack(true);
-  }, [loaded, snapshot?.finished, snapshot?.path, snapshot?.duration, nextTrack]);
+  }, [
+    loaded,
+    queueAligned,
+    snapshot?.finished,
+    snapshot?.path,
+    snapshot?.segmentStart,
+    snapshot?.duration,
+    nextTrack,
+  ]);
+
+  useEffect(() => {
+    if (!inTauri) return;
+    const next = queueAligned && nextIndex != null ? queue[nextIndex] : null;
+    void setPlayerNext(
+      next
+        ? { path: next.path, start: next.cueStart ?? 0, end: next.cueEnd ?? null }
+        : null,
+    );
+  }, [
+    queueAligned,
+    nextIndex,
+    queue,
+    nextRefresh,
+    loaded?.outputMode,
+    loaded?.device,
+  ]);
+
+  useEffect(() => {
+    if (!loaded) return;
+    const index = queue.findIndex(
+      (item) =>
+        item.path === loaded.path &&
+        Math.abs((item.cueStart ?? 0) - loaded.segmentStart) < 0.05,
+    );
+    if (index >= 0 && index !== currentIndex) {
+      syncCurrent(loaded.path, loaded.segmentStart);
+    }
+  }, [loaded?.path, loaded?.segmentStart, queue, currentIndex, syncCurrent]);
 
   useEffect(() => {
     if (loaded) void setTrackVolume(volume);
@@ -603,6 +655,7 @@ export default function GlassDemo() {
 
   const commitSeek = () => {
     if (loaded) void seekTrack(Math.max(0, Math.min(time, loaded.duration || time)));
+    setNextRefresh((value) => value + 1);
   };
 
   const seekTo = (seconds: number) => {
@@ -611,6 +664,7 @@ export default function GlassDemo() {
     const clamped = duration > 0 ? Math.min(relative, duration) : relative;
     setTime(clamped);
     if (loaded) void seekTrack(clamped);
+    setNextRefresh((value) => value + 1);
   };
 
   const changeLyricOffset = (value: number) => {
@@ -640,6 +694,7 @@ export default function GlassDemo() {
   const changeOutputMode = (mode: "exclusive" | "shared") => {
     setOutputPreference(mode);
     if (loaded) void setOutputMode(mode);
+    setNextRefresh((value) => value + 1);
   };
 
   const handleOpen = async () => {

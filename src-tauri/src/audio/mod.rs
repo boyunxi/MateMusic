@@ -68,6 +68,7 @@ pub struct PlayerSnapshot {
     pub device: String,
     pub underruns: u64,
     pub finished: bool,
+    pub segment_start: f64,
     pub error: Option<String>,
     pub note: Option<String>,
 }
@@ -89,6 +90,7 @@ struct Meta {
     device: String,
     error: Option<String>,
     note: Option<String>,
+    segment_start: f64,
 }
 
 pub(crate) struct Shared {
@@ -169,10 +171,17 @@ impl Shared {
             device: meta.device.clone(),
             underruns: self.underruns.load(Ordering::Relaxed),
             finished: self.finished.load(Ordering::Relaxed),
+            segment_start: meta.segment_start,
             error: meta.error.clone(),
             note: meta.note.clone(),
         }
     }
+}
+
+pub struct NextRequest {
+    pub path: PathBuf,
+    pub start: f64,
+    pub end: Option<f64>,
 }
 
 enum Command {
@@ -181,6 +190,7 @@ enum Command {
         start: f64,
         end: Option<f64>,
     },
+    SetNext(Option<NextRequest>),
     Play,
     Pause,
     Seek(f64),
@@ -220,6 +230,10 @@ impl AudioEngine {
             start: start.max(0.0),
             end,
         });
+    }
+
+    pub fn set_next(&self, next: Option<NextRequest>) {
+        let _ = self.tx.send(Command::SetNext(next));
     }
 
     pub fn play(&self) {
@@ -892,6 +906,27 @@ struct DeviceSetup {
     name: String,
 }
 
+struct NextInfo {
+    path: String,
+    title: String,
+    codec: String,
+    sample_rate: u32,
+    bits: Option<u32>,
+    channels: usize,
+    duration: f64,
+    segment_start: f64,
+}
+
+struct Preloaded {
+    session: Session,
+    info: NextInfo,
+}
+
+struct Transition {
+    at_frames: u64,
+    info: NextInfo,
+}
+
 impl DeviceSetup {
     fn signature(&self) -> String {
         format!(
@@ -1066,6 +1101,8 @@ where
 
     let mut session: Option<Session> = None;
     let mut output: Option<ActiveOutput> = None;
+    let mut preloaded: Option<Preloaded> = None;
+    let mut transition: Option<Transition> = None;
     let mut preferred_mode = OutputMode::Exclusive;
     let mut force_shared = false;
     let mut exclusive_guard: Option<(Instant, f64)> = None;
@@ -1101,6 +1138,8 @@ where
                     let position = snap.position;
                     shared.playing.store(false, Ordering::Relaxed);
                     output = None;
+                    preloaded = None;
+                    transition = None;
                     exclusive_guard = None;
 
                     if let Some(device_setup) = setup.as_ref() {
@@ -1164,6 +1203,8 @@ where
                 Command::Load { path, start, end } => {
                     shared.playing.store(false, Ordering::Relaxed);
                     shared.finished.store(false, Ordering::Relaxed);
+                    preloaded = None;
+                    transition = None;
                     output = None;
                     force_shared = false;
                     exclusive_guard = None;
@@ -1199,6 +1240,7 @@ where
                                 meta.bits = info.bits;
                                 meta.channels = info.channels;
                                 meta.duration = new_session.segment_duration;
+                                meta.segment_start = start.max(0.0);
                                 meta.error = None;
                                 meta.note = None;
                             }
@@ -1242,10 +1284,61 @@ where
                                 meta.bits = None;
                                 meta.channels = 0;
                                 meta.duration = 0.0;
+                                meta.segment_start = 0.0;
                                 meta.note = None;
                                 meta.error = Some(e.clone());
                             }
                             shared.report_error(e);
+                        }
+                    }
+                }
+                Command::SetNext(next) => {
+                    preloaded = None;
+                    if let Some(request) = next {
+                        let shared_mode = output
+                            .as_ref()
+                            .map(|out| out.mode == OutputMode::Shared)
+                            .unwrap_or(false);
+                        if shared_mode {
+                            let (out_rate, out_channels) = shared
+                                .meta
+                                .lock()
+                                .map(|meta| (meta.output_rate, meta.output_channels))
+                                .unwrap_or((0, 0));
+                            if out_rate > 0 && out_channels > 0 {
+                                match Session::open(&request.path) {
+                                    Ok((mut next_session, info)) => {
+                                        let start = request.start.max(0.0);
+                                        next_session.set_range(start, request.end);
+                                        if start > 0.0 {
+                                            if let Err(error) = next_session.seek(0.0) {
+                                                eprintln!("gapless preload seek failed: {error}");
+                                            }
+                                        }
+                                        next_session.configure_output(out_rate, out_channels);
+                                        let duration = next_session.segment_duration;
+                                        preloaded = Some(Preloaded {
+                                            session: next_session,
+                                            info: NextInfo {
+                                                path: request
+                                                    .path
+                                                    .to_string_lossy()
+                                                    .to_string(),
+                                                title: info.title,
+                                                codec: info.codec,
+                                                sample_rate: info.sample_rate,
+                                                bits: info.bits,
+                                                channels: info.channels,
+                                                duration,
+                                                segment_start: start,
+                                            },
+                                        });
+                                    }
+                                    Err(error) => {
+                                        eprintln!("gapless preload failed: {error}");
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -1303,6 +1396,8 @@ where
                     if let Some(s) = session.as_mut() {
                         let was_playing = shared.playing.load(Ordering::Relaxed);
                         shared.playing.store(false, Ordering::Relaxed);
+                        preloaded = None;
+                        transition = None;
                         // 共享链路原地清空环形缓冲，不重建输出流，避免爆音与卡顿
                         let keep_shared = output
                             .as_ref()
@@ -1365,6 +1460,8 @@ where
                     preferred_mode = mode;
                     force_shared = mode == OutputMode::Shared;
                     exclusive_guard = None;
+                    preloaded = None;
+                    transition = None;
                     if let (Some(s), Some(device_setup)) = (session.as_mut(), setup.as_ref()) {
                         let snap = shared.snapshot();
                         let was_playing = shared.playing.load(Ordering::Relaxed);
@@ -1431,6 +1528,48 @@ where
             }
         }
 
+        if let Some(pending) = transition.as_ref() {
+            let played = shared.played_samples.load(Ordering::Relaxed);
+            if played >= pending.at_frames {
+                let pending = transition.take().expect("transition checked above");
+                let remainder = played - pending.at_frames;
+                shared.played_samples.store(remainder, Ordering::Relaxed);
+                shared.set_base(0.0);
+                shared.finished.store(false, Ordering::Relaxed);
+                if let Ok(mut meta) = shared.meta.lock() {
+                    meta.path = pending.info.path;
+                    meta.title = pending.info.title;
+                    meta.codec = pending.info.codec;
+                    meta.sample_rate = pending.info.sample_rate;
+                    meta.bits = pending.info.bits;
+                    meta.channels = pending.info.channels;
+                    meta.duration = pending.info.duration;
+                    meta.segment_start = pending.info.segment_start;
+                }
+            }
+        }
+
+        if transition.is_none()
+            && session
+                .as_ref()
+                .map(|session| session.finished && session.pending.is_empty())
+                .unwrap_or(false)
+        {
+            if let Some(next) = preloaded.take() {
+                let at_frames = session
+                    .as_ref()
+                    .map(|session| session.emitted_frames)
+                    .unwrap_or(0);
+                if at_frames > 0 {
+                    session = Some(next.session);
+                    transition = Some(Transition {
+                        at_frames,
+                        info: next.info,
+                    });
+                }
+            }
+        }
+
         if let (Some(session), Some(output_ref)) = (session.as_mut(), output.as_mut()) {
             let producer_ref = &mut output_ref.producer;
             if !session.pending.is_empty() {
@@ -1462,6 +1601,7 @@ where
             if session.finished
                 && session.pending.is_empty()
                 && producer_ref.occupied_len() == 0
+                && transition.is_none()
                 && shared.playing.load(Ordering::Relaxed)
             {
                 shared.playing.store(false, Ordering::Relaxed);

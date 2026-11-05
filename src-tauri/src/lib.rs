@@ -44,6 +44,23 @@ fn player_load(
 }
 
 #[tauri::command]
+fn player_set_next(
+    state: State<'_, EngineState>,
+    path: Option<String>,
+    start: Option<f64>,
+    end: Option<f64>,
+) {
+    if let Ok(engine) = state.0.lock() {
+        let next = path.map(|path| audio::NextRequest {
+            path: PathBuf::from(path),
+            start: start.unwrap_or(0.0).max(0.0),
+            end,
+        });
+        engine.set_next(next);
+    }
+}
+
+#[tauri::command]
 fn player_play(state: State<'_, EngineState>) {
     if let Ok(engine) = state.0.lock() {
         engine.play();
@@ -116,6 +133,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             app_info,
             player_load,
+            player_set_next,
             player_play,
             player_pause,
             player_seek,

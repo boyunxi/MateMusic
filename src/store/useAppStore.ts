@@ -15,6 +15,7 @@ type AppState = {
   restore: (queue: LibraryTrack[], currentIndex: number, mode: PlayMode) => void;
   playTrack: (track: LibraryTrack, list?: LibraryTrack[]) => void;
   playIndex: (index: number) => void;
+  syncCurrent: (path: string, segmentStart: number) => void;
   enqueue: (track: LibraryTrack) => void;
   removeAt: (index: number) => void;
   move: (from: number, to: number) => void;
@@ -55,6 +56,16 @@ export const useAppStore = create<AppState>((set, get) => {
     playIndex: (index) => {
       const queue = get().queue;
       if (index >= 0 && index < queue.length) playAt(queue, index);
+    },
+
+    syncCurrent: (path, segmentStart) => {
+      const { queue } = get();
+      const index = queue.findIndex(
+        (track) =>
+          track.path === path &&
+          Math.abs((track.cueStart ?? 0) - segmentStart) < 0.05,
+      );
+      if (index >= 0) set({ currentIndex: index });
     },
 
     enqueue: (track) => {
