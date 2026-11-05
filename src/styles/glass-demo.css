@@ -77,6 +77,40 @@
   animation-direction: alternate-reverse;
 }
 
+.immersive-art {
+  position: absolute;
+  inset: -14%;
+  background-position: center;
+  background-size: cover;
+  filter: blur(94px) saturate(1.38) brightness(0.72);
+  opacity: 0.92;
+  transform: scale(1.14);
+  transition: opacity 600ms var(--ease-out);
+}
+
+.demo[data-theme="light"] .immersive-art {
+  filter: blur(94px) saturate(1.12) brightness(1.1);
+  opacity: 0.62;
+}
+
+.demo[data-immersive="true"] .veil {
+  background: linear-gradient(
+    180deg,
+    rgba(4, 7, 12, 0.18),
+    rgba(4, 7, 12, 0.38) 52%,
+    rgba(3, 5, 9, 0.58)
+  );
+}
+
+.demo[data-theme="light"][data-immersive="true"] .veil {
+  background: linear-gradient(
+    180deg,
+    rgba(240, 247, 246, 0.24),
+    rgba(226, 238, 238, 0.4) 55%,
+    rgba(214, 230, 231, 0.52)
+  );
+}
+
 .veil {
   position: absolute;
   inset: 0;
@@ -1297,16 +1331,37 @@
 
 .layout.is-immersive .now {
   display: grid;
-  grid-template-columns: minmax(0, 0.92fr) minmax(0, 1.08fr);
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   grid-template-rows: auto minmax(0, 1fr) auto;
   grid-template-areas:
     "head head"
     "cover lyrics"
     "progress progress";
-  column-gap: clamp(30px, 5vw, 84px);
-  row-gap: 10px;
-  padding: 18px clamp(26px, 5vw, 68px);
+  column-gap: clamp(34px, 5.4vw, 92px);
+  row-gap: 12px;
+  padding: 18px clamp(28px, 5vw, 64px);
   overflow: hidden;
+  background: linear-gradient(
+    155deg,
+    rgba(10, 14, 22, 0.2),
+    rgba(8, 10, 16, 0.48) 52%,
+    rgba(10, 14, 22, 0.24)
+  );
+  box-shadow:
+    var(--glass-shadow),
+    inset 0 0 140px rgba(0, 0, 0, 0.26);
+}
+
+.demo[data-theme="light"] .layout.is-immersive .now {
+  background: linear-gradient(
+    155deg,
+    rgba(255, 255, 255, 0.36),
+    rgba(255, 255, 255, 0.2) 52%,
+    rgba(255, 255, 255, 0.36)
+  );
+  box-shadow:
+    var(--glass-shadow),
+    inset 0 0 120px rgba(80, 110, 120, 0.1);
 }
 
 .layout.is-immersive .now-head {
@@ -1354,8 +1409,12 @@
 }
 
 .layout.is-immersive .cover {
-  width: min(100%, 56vh);
-  max-width: 560px;
+  width: min(100%, 60vh);
+  max-width: 600px;
+  box-shadow:
+    0 34px 86px rgba(0, 0, 0, 0.55),
+    0 0 74px var(--accent-glow, rgba(143, 227, 213, 0.28)),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.14);
 }
 
 .layout.is-immersive .lyrics {
@@ -1377,28 +1436,17 @@
 }
 
 .layout.is-immersive .lp-text {
-  font-size: 18px;
+  font-size: 20px;
+  letter-spacing: 0.005em;
 }
 
 .layout.is-immersive .lp-line.is-active .lp-text {
-  font-size: 24px;
+  font-size: 28px;
+  font-weight: 600;
 }
 
 .layout.is-immersive .lp-translation {
-  font-size: 12px;
-}
-
-.layout.is-immersive .transport {
-  grid-area: progress;
-  gap: 6px;
-  margin: 0;
-  padding: 0;
-}
-
-.layout.is-immersive .transport-row {
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  font-size: 13px;
 }
 
 .layout.is-immersive .lp-track {
@@ -1406,19 +1454,66 @@
   justify-content: center;
 }
 
-.layout.is-immersive .transport-side,
-.layout.is-immersive .volume,
-.layout.is-immersive .transport-main > .icon-button {
+.layout.is-immersive .transport {
   display: none;
 }
 
-.layout.is-immersive .transport-main {
-  gap: 0;
+.immersive-transport {
+  display: flex;
+  grid-area: progress;
+  align-items: center;
+  justify-self: center;
+  gap: 16px;
+  width: min(760px, 100%);
+  padding: 10px 20px 9px 10px;
+  border: 1px solid var(--glass-border);
+  border-radius: 999px;
+  background: linear-gradient(150deg, var(--tile-strong), var(--tile));
+  box-shadow:
+    0 20px 50px rgba(0, 0, 0, 0.28),
+    inset 0 1px 0 var(--glass-sheen);
+  backdrop-filter: blur(20px) saturate(140%);
+  -webkit-backdrop-filter: blur(20px) saturate(140%);
 }
 
-.layout.is-immersive .play-button {
-  width: 44px;
-  height: 44px;
+.immersive-transport .play-button {
+  flex: none;
+  width: 46px;
+  height: 46px;
+  background: radial-gradient(
+    circle at 35% 28%,
+    #ffffff,
+    var(--accent) 56%,
+    var(--accent-strong)
+  );
+  color: #061a18;
+  box-shadow:
+    0 10px 30px var(--accent-glow, rgba(143, 227, 213, 0.3)),
+    inset 0 1px 0 rgba(255, 255, 255, 0.7);
+}
+
+.demo[data-theme="light"] .immersive-transport .play-button {
+  color: #ffffff;
+}
+
+.immersive-seek {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.immersive-seek .progress {
+  height: 4px;
+}
+
+.immersive-times {
+  display: flex;
+  justify-content: space-between;
+  color: var(--text-faint);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
 }
 
 @media (max-width: 860px) {

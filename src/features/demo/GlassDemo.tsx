@@ -816,6 +816,12 @@ export default function GlassDemo() {
       <div className="backdrop" aria-hidden="true">
         <div className="aurora" />
         <div className="aurora aurora-alt" />
+        {immersive && heroCover && (
+          <div
+            className="immersive-art"
+            style={{ backgroundImage: `url("${heroCover}")` }}
+          />
+        )}
         <div className="veil" />
         <div className="grain" />
       </div>
@@ -1218,6 +1224,42 @@ export default function GlassDemo() {
                   </div>
                 </div>
               </section>
+
+              {immersive && (
+                <section className="immersive-transport" aria-label="播放控制">
+                  <button
+                    type="button"
+                    className="play-button"
+                    onClick={togglePlay}
+                    aria-label={isPlaying ? "暂停" : "播放"}
+                  >
+                    {isPlaying ? (
+                      <Pause size={20} fill="currentColor" />
+                    ) : (
+                      <Play size={20} fill="currentColor" />
+                    )}
+                  </button>
+                  <div className="immersive-seek">
+                    <input
+                      className="range progress"
+                      type="range"
+                      min={0}
+                      max={duration || 1}
+                      step={0.1}
+                      value={Math.min(time, duration || 1)}
+                      onChange={seek}
+                      onPointerUp={commitSeek}
+                      onKeyUp={commitSeek}
+                      style={{ "--pct": `${progress * 100}%` } as CSSProperties}
+                      aria-label="播放进度"
+                    />
+                    <div className="immersive-times">
+                      <span>{formatTime(time)}</span>
+                      <span>{formatTime(duration)}</span>
+                    </div>
+                  </div>
+                </section>
+              )}
             </>
           )}
         </main>
