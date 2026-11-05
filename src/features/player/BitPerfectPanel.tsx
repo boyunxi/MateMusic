@@ -33,7 +33,9 @@ export default function BitPerfectPanel({ snapshot, full = false }: Props) {
   const verdictKey = snapshot?.bitPerfectVerdict ?? "idle";
   const verdict = VERDICTS[verdictKey] ?? VERDICTS.idle;
   const reasons = snapshot?.bitPerfectReasons ?? [];
-  const exclusive = snapshot?.outputMode.includes("独占") ?? false;
+  const exclusive =
+    (snapshot?.outputMode.includes("独占") || snapshot?.outputMode.includes("ASIO")) ??
+    false;
   const rateMatch =
     !!snapshot && snapshot.sampleRate > 0 && snapshot.sampleRate === snapshot.outputRate;
   const channelsMatch =

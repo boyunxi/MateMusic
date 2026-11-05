@@ -118,6 +118,42 @@ pub struct TrackPage {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct AlbumRow {
+    pub album: String,
+    pub album_artist: Option<String>,
+    pub artist: Option<String>,
+    pub year: Option<u32>,
+    pub track_count: i64,
+    pub duration: f64,
+    pub cover_path: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtistRow {
+    pub artist: String,
+    pub album_count: i64,
+    pub track_count: i64,
+    pub duration: f64,
+    pub cover_path: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AlbumPage {
+    pub total: i64,
+    pub albums: Vec<AlbumRow>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtistPage {
+    pub total: i64,
+    pub artists: Vec<ArtistRow>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct FolderRow {
     pub id: i64,
     pub path: String,
@@ -352,6 +388,233 @@ pub fn library_get_tracks(
             .map_err(|e| format!("读取曲目失败: {e}"))?;
         Ok(TrackPage { total, tracks })
     }
+}
+
+fn album_artist_expr() -> &'static str {
+    "COALESCE(NULLIF(album_artist, ''), artist)"
+}
+
+#[tauri::command]
+pub fn library_get_albums(
+    state: State<'_, LibraryState>,
+    search: Option<String>,
+    sort: Option<String>,
+    limit: Option<u32>,
+    offset: Option<u32>,
+) -> Result<AlbumPage, String> {
+    let conn = state.conn()?;
+    let limit = limit.unwrap_or(500).clamp(1, 1000) as i64;
+    let offset = offset.unwrap_or(0).max(0) as i64;
+    let query = search.unwrap_or_default().trim().to_string();
+    let order = match sort.as_deref() {
+        Some("artist") => "album_artist COLLATE NOCASE, album COLLATE NOCASE",
+        Some("year") => "COALESCE(year, 0) DESC, album COLLATE NOCASE",
+        _ => "album COLLATE NOCASE, album_artist COLLATE NOCASE",
+    };
+    let filter = if query.is_empty() {
+        String::new()
+    } else {
+        "AND (album LIKE ?1 ESCAPE '\\' OR COALESCE(NULLIF(album_artist, ''), artist) LIKE ?1 ESCAPE '\\' OR artist LIKE ?1 ESCAPE '\\')"
+            .to_string()
+    };
+    let limit_clause = if query.is_empty() {
+        "?1 OFFSET ?2"
+    } else {
+        "?2 OFFSET ?3"
+    };
+    let like = format!("%{}%", escape_like(&query));
+    let album_expr = album_artist_expr();
+    let count_sql = format!(
+        "SELECT COUNT(*) FROM (
+             SELECT 1 FROM tracks
+             WHERE album IS NOT NULL AND album <> '' {filter}
+             GROUP BY album, {album_expr}
+         )"
+    );
+    let total: i64 = if query.is_empty() {
+        conn.query_row(&count_sql, [], |row| row.get(0))
+    } else {
+        conn.query_row(&count_sql, params![like], |row| row.get(0))
+    }
+    .map_err(|error| format!("统计专辑失败: {error}"))?;
+
+    let sql = format!(
+        "SELECT album, {album_expr} AS album_artist, MIN(artist) AS artist, MIN(year) AS year,
+                COUNT(*) AS track_count, COALESCE(SUM(duration), 0) AS duration,
+                MAX(cover_path) AS cover_path
+         FROM tracks
+         WHERE album IS NOT NULL AND album <> '' {filter}
+         GROUP BY album, {album_expr}
+         ORDER BY {order}
+         LIMIT {limit_clause}"
+    );
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|error| format!("查询专辑失败: {error}"))?;
+    let map = |row: &Row<'_>| -> rusqlite::Result<AlbumRow> {
+        Ok(AlbumRow {
+            album: row.get(0)?,
+            album_artist: row.get(1)?,
+            artist: row.get(2)?,
+            year: row.get::<_, Option<i64>>(3)?.map(|value| value.max(0) as u32),
+            track_count: row.get(4)?,
+            duration: row.get::<_, Option<f64>>(5)?.unwrap_or(0.0),
+            cover_path: row.get(6)?,
+        })
+    };
+    let albums = if query.is_empty() {
+        stmt.query_map(params![limit, offset], map)
+    } else {
+        stmt.query_map(params![like, limit, offset], map)
+    }
+    .map_err(|error| format!("查询专辑失败: {error}"))?
+    .collect::<rusqlite::Result<Vec<_>>>()
+    .map_err(|error| format!("读取专辑失败: {error}"))?;
+    Ok(AlbumPage { total, albums })
+}
+
+#[tauri::command]
+pub fn library_get_artists(
+    state: State<'_, LibraryState>,
+    search: Option<String>,
+    sort: Option<String>,
+    limit: Option<u32>,
+    offset: Option<u32>,
+) -> Result<ArtistPage, String> {
+    let conn = state.conn()?;
+    let limit = limit.unwrap_or(500).clamp(1, 1000) as i64;
+    let offset = offset.unwrap_or(0).max(0) as i64;
+    let query = search.unwrap_or_default().trim().to_string();
+    let order = match sort.as_deref() {
+        Some("tracks") => "track_count DESC, artist COLLATE NOCASE",
+        Some("albums") => "album_count DESC, artist COLLATE NOCASE",
+        _ => "artist COLLATE NOCASE",
+    };
+    let filter = if query.is_empty() {
+        String::new()
+    } else {
+        "AND (artist LIKE ?1 ESCAPE '\\' OR album LIKE ?1 ESCAPE '\\')".to_string()
+    };
+    let limit_clause = if query.is_empty() {
+        "?1 OFFSET ?2"
+    } else {
+        "?2 OFFSET ?3"
+    };
+    let like = format!("%{}%", escape_like(&query));
+    let count_sql = format!(
+        "SELECT COUNT(*) FROM (
+             SELECT 1 FROM tracks
+             WHERE artist IS NOT NULL AND artist <> '' {filter}
+             GROUP BY artist
+         )"
+    );
+    let total: i64 = if query.is_empty() {
+        conn.query_row(&count_sql, [], |row| row.get(0))
+    } else {
+        conn.query_row(&count_sql, params![like], |row| row.get(0))
+    }
+    .map_err(|error| format!("统计艺术家失败: {error}"))?;
+
+    let sql = format!(
+        "SELECT artist, COUNT(DISTINCT album) AS album_count, COUNT(*) AS track_count,
+                COALESCE(SUM(duration), 0) AS duration, MAX(cover_path) AS cover_path
+         FROM tracks
+         WHERE artist IS NOT NULL AND artist <> '' {filter}
+         GROUP BY artist
+         ORDER BY {order}
+         LIMIT {limit_clause}"
+    );
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|error| format!("查询艺术家失败: {error}"))?;
+    let map = |row: &Row<'_>| -> rusqlite::Result<ArtistRow> {
+        Ok(ArtistRow {
+            artist: row.get(0)?,
+            album_count: row.get(1)?,
+            track_count: row.get(2)?,
+            duration: row.get::<_, Option<f64>>(3)?.unwrap_or(0.0),
+            cover_path: row.get(4)?,
+        })
+    };
+    let artists = if query.is_empty() {
+        stmt.query_map(params![limit, offset], map)
+    } else {
+        stmt.query_map(params![like, limit, offset], map)
+    }
+    .map_err(|error| format!("查询艺术家失败: {error}"))?
+    .collect::<rusqlite::Result<Vec<_>>>()
+    .map_err(|error| format!("读取艺术家失败: {error}"))?;
+    Ok(ArtistPage { total, artists })
+}
+
+#[tauri::command]
+pub fn library_get_album_tracks(
+    state: State<'_, LibraryState>,
+    album: String,
+    album_artist: Option<String>,
+    limit: Option<u32>,
+    offset: Option<u32>,
+) -> Result<TrackPage, String> {
+    let conn = state.conn()?;
+    let limit = limit.unwrap_or(1000).clamp(1, 2000) as i64;
+    let offset = offset.unwrap_or(0).max(0) as i64;
+    let artist = album_artist.filter(|value| !value.trim().is_empty());
+    let total: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM tracks WHERE album = ?1 AND (?2 IS NULL OR COALESCE(NULLIF(album_artist, ''), artist) = ?2)",
+            params![album, artist],
+            |row| row.get(0),
+        )
+        .map_err(|error| format!("统计专辑曲目失败: {error}"))?;
+    let sql = format!(
+        "SELECT {TRACK_COLUMNS} FROM tracks
+         WHERE album = ?1 AND (?2 IS NULL OR COALESCE(NULLIF(album_artist, ''), artist) = ?2)
+         ORDER BY disc_no, track_no, title COLLATE NOCASE
+         LIMIT ?3 OFFSET ?4"
+    );
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|error| format!("查询专辑曲目失败: {error}"))?;
+    let tracks = stmt
+        .query_map(params![album, artist, limit, offset], map_track)
+        .map_err(|error| format!("查询专辑曲目失败: {error}"))?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|error| format!("读取专辑曲目失败: {error}"))?;
+    Ok(TrackPage { total, tracks })
+}
+
+#[tauri::command]
+pub fn library_get_artist_tracks(
+    state: State<'_, LibraryState>,
+    artist: String,
+    limit: Option<u32>,
+    offset: Option<u32>,
+) -> Result<TrackPage, String> {
+    let conn = state.conn()?;
+    let limit = limit.unwrap_or(1000).clamp(1, 2000) as i64;
+    let offset = offset.unwrap_or(0).max(0) as i64;
+    let total: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM tracks WHERE artist = ?1",
+            params![artist],
+            |row| row.get(0),
+        )
+        .map_err(|error| format!("统计艺术家曲目失败: {error}"))?;
+    let sql = format!(
+        "SELECT {TRACK_COLUMNS} FROM tracks
+         WHERE artist = ?1
+         ORDER BY album COLLATE NOCASE, disc_no, track_no, title COLLATE NOCASE
+         LIMIT ?2 OFFSET ?3"
+    );
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|error| format!("查询艺术家曲目失败: {error}"))?;
+    let tracks = stmt
+        .query_map(params![artist, limit, offset], map_track)
+        .map_err(|error| format!("查询艺术家曲目失败: {error}"))?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|error| format!("读取艺术家曲目失败: {error}"))?;
+    Ok(TrackPage { total, tracks })
 }
 
 #[tauri::command]

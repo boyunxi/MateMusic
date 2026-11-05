@@ -502,6 +502,10 @@
   background: rgba(0, 0, 0, 0.2);
 }
 
+.segmented.is-three {
+  grid-template-columns: repeat(3, 1fr);
+}
+
 .demo[data-theme="light"] .segmented {
   background: rgba(255, 255, 255, 0.42);
 }
@@ -752,6 +756,28 @@
   color: var(--text-faint);
   font-size: 11px;
   line-height: 1.65;
+}
+
+.settings-offset-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.settings-offset-actions button {
+  flex: 1;
+  padding: 6px 8px;
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  background: var(--tile);
+  color: var(--text);
+  font: inherit;
+  font-size: 10.5px;
+  cursor: pointer;
+}
+
+.settings-offset-actions button:hover {
+  background: var(--tile-strong);
+  color: var(--text-strong);
 }
 
 .settings-action {

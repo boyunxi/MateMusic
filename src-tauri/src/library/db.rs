@@ -144,6 +144,19 @@ CREATE INDEX IF NOT EXISTS idx_tracks_folder ON tracks(folder_id);
 PRAGMA user_version = 3;
 "#,
         )?;
+        version = 3;
+    }
+    if version < 4 {
+        conn.execute_batch(
+            r#"
+CREATE INDEX IF NOT EXISTS idx_tracks_album_artist ON tracks(album, album_artist);
+CREATE INDEX IF NOT EXISTS idx_tracks_artist_album ON tracks(artist, album);
+CREATE INDEX IF NOT EXISTS idx_tracks_added ON tracks(added_at DESC);
+CREATE INDEX IF NOT EXISTS idx_tracks_album_title ON tracks(album COLLATE NOCASE);
+CREATE INDEX IF NOT EXISTS idx_tracks_artist_name ON tracks(artist COLLATE NOCASE);
+PRAGMA user_version = 4;
+"#,
+        )?;
     }
     Ok(())
 }

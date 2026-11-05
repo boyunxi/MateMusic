@@ -11,8 +11,8 @@ use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
 use windows::Win32::Media::Audio::{
     eConsole, eRender, IAudioClient, IAudioClock, IAudioRenderClient, IMMDevice,
     IMMDeviceEnumerator, MMDeviceEnumerator, AUDCLNT_SHAREMODE_EXCLUSIVE,
-    AUDCLNT_STREAMFLAGS_EVENTCALLBACK, WAVEFORMATEX, WAVEFORMATEXTENSIBLE,
-    WAVEFORMATEXTENSIBLE_0,
+    AUDCLNT_STREAMFLAGS_EVENTCALLBACK, DEVICE_STATE_ACTIVE, WAVEFORMATEX,
+    WAVEFORMATEXTENSIBLE, WAVEFORMATEXTENSIBLE_0,
 };
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_ALL,
@@ -485,6 +485,65 @@ pub fn diagnose() -> Vec<String> {
                     return lines;
                 }
             };
+        if let Ok(devices) = enumerator.EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE) {
+            if let Ok(count) = devices.GetCount() {
+                lines.push(format!("render endpoints: {count}"));
+                for index in 0..count {
+                    let Ok(device) = devices.Item(index) else {
+                        continue;
+                    };
+                    let Ok(client) = activate(&device) else {
+                        lines.push(format!("device[{index}] activate failed"));
+                        continue;
+                    };
+                    let mut default_period = 0i64;
+                    let mut min_period = 0i64;
+                    let _ = client.GetDevicePeriod(Some(&mut default_period), Some(&mut min_period));
+                    let period = if default_period > 0 {
+                        default_period
+                    } else if min_period > 0 {
+                        min_period
+                    } else {
+                        106_667
+                    };
+                    let mut cells = Vec::new();
+                    for rate in [44100u32, 48000, 88200, 96000, 176400, 192000] {
+                        let mut supported = Vec::new();
+                        for encoding in
+                            [Encoding::I16, Encoding::I24In32, Encoding::I24, Encoding::F32]
+                        {
+                            let format = build_format(rate, 2, encoding);
+                            let hr = client.IsFormatSupported(
+                                AUDCLNT_SHAREMODE_EXCLUSIVE,
+                                std::ptr::addr_of!(format.Format),
+                                None,
+                            );
+                            if hr.0 == 0 {
+                                let label = match encoding {
+                                    Encoding::I16 => "16",
+                                    Encoding::I24In32 | Encoding::I24 => "24",
+                                    Encoding::F32 => "f32",
+                                };
+                                if !supported.contains(&label) {
+                                    supported.push(label);
+                                }
+                            }
+                        }
+                        let cell = if supported.is_empty() {
+                            "-".to_string()
+                        } else {
+                            supported.join("/")
+                        };
+                        cells.push(format!("{rate}:{cell}"));
+                    }
+                    lines.push(format!(
+                        "device[{index}] period={period}hns {}",
+                        cells.join(" ")
+                    ));
+                }
+            }
+        }
+
         let device = match enumerator.GetDefaultAudioEndpoint(eRender, eConsole) {
             Ok(value) => value,
             Err(e) => {

@@ -63,11 +63,13 @@ export const loadTrack = (
   path: string,
   start?: number | null,
   end?: number | null,
+  autoplay = true,
 ) =>
   invoke<void>("player_load", {
     path,
     start: start ?? null,
     end: end ?? null,
+    autoplay,
   });
 
 export const setPlayerNext = (
@@ -83,7 +85,7 @@ export const pauseTrack = () => invoke<void>("player_pause");
 export const seekTrack = (position: number) => invoke<void>("player_seek", { position });
 export const setTrackVolume = (volume: number) => invoke<void>("player_set_volume", { volume });
 export const setPlaybackSpeed = (speed: number) => invoke<void>("player_set_speed", { speed });
-export const setOutputMode = (mode: "exclusive" | "shared") =>
+export const setOutputMode = (mode: "exclusive" | "shared" | "asio") =>
   invoke<void>("player_set_output_mode", { mode });
 export const getPlayerState = () => invoke<PlayerSnapshot>("player_state");
 export const subscribePlayer = (onState: (state: PlayerSnapshot) => void) =>
@@ -96,3 +98,12 @@ export const setSmtcMetadata = (metadata: {
   album: string | null;
 }) => invoke<void>("smtc_set_metadata", metadata);
 export const getSmtcAvailable = () => invoke<boolean>("smtc_available");
+
+export type AsioStatus = {
+  enabled: boolean;
+  driverFound: boolean;
+  drivers: string[];
+  message: string;
+};
+
+export const getAsioStatus = () => invoke<AsioStatus>("audio_asio_status");

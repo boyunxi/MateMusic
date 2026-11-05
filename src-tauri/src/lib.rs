@@ -37,12 +37,14 @@ fn player_load(
     path: String,
     start: Option<f64>,
     end: Option<f64>,
+    autoplay: Option<bool>,
 ) {
     if let Ok(engine) = state.0.lock() {
-        engine.load_range(
+        engine.load_range_with_autoplay(
             PathBuf::from(path),
             start.unwrap_or(0.0).max(0.0),
             end,
+            autoplay.unwrap_or(true),
         );
     }
 }
@@ -144,6 +146,11 @@ fn smtc_available(state: State<'_, SmtcState>) -> bool {
         .unwrap_or(false)
 }
 
+#[tauri::command]
+fn audio_asio_status() -> audio::AsioStatus {
+    audio::asio_status()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -211,10 +218,15 @@ pub fn run() {
             player_state,
             smtc_set_metadata,
             smtc_available,
+            audio_asio_status,
             library::library_import_folder,
             library::library_cancel_scan,
             library::library_scan_status,
             library::library_get_tracks,
+            library::library_get_albums,
+            library::library_get_artists,
+            library::library_get_album_tracks,
+            library::library_get_artist_tracks,
             library::library_get_folders,
             library::library_stats,
             library::settings_get_all,

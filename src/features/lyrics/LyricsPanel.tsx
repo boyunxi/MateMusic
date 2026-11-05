@@ -8,6 +8,7 @@ type Props = {
   error: string | null;
   position: number;
   offsetMs: number;
+  globalOffsetMs?: number;
   onOffsetChange: (value: number) => void;
   onSeek: (seconds: number) => void;
   compact?: boolean;
@@ -72,6 +73,7 @@ export default function LyricsPanel({
   error,
   position,
   offsetMs,
+  globalOffsetMs = 0,
   onOffsetChange,
   onSeek,
   compact = false,
@@ -91,7 +93,7 @@ export default function LyricsPanel({
     return () => observer.disconnect();
   }, [fill, loading, doc]);
 
-  const totalOffset = (doc?.offsetMs ?? 0) + offsetMs;
+  const totalOffset = (doc?.offsetMs ?? 0) + offsetMs + globalOffsetMs;
   const effectiveMs = position * 1000 + totalOffset;
   const lineHeight = compact ? COMPACT_LINE : FULL_LINE;
   const viewportHeight = fill

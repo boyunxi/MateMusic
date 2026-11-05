@@ -38,6 +38,7 @@ const PREFETCH_THRESHOLD: usize = 16 * 1024;
 pub enum OutputMode {
     Exclusive,
     Shared,
+    Asio,
 }
 
 impl OutputMode {
@@ -45,6 +46,7 @@ impl OutputMode {
         match value {
             "exclusive" => Some(Self::Exclusive),
             "shared" => Some(Self::Shared),
+            "asio" => Some(Self::Asio),
             _ => None,
         }
     }
@@ -301,6 +303,7 @@ enum Command {
         path: PathBuf,
         start: f64,
         end: Option<f64>,
+        autoplay: bool,
     },
     SetNext(Option<NextRequest>),
     Play,
@@ -338,10 +341,21 @@ impl AudioEngine {
     }
 
     pub fn load_range(&self, path: PathBuf, start: f64, end: Option<f64>) {
+        self.load_range_with_autoplay(path, start, end, true);
+    }
+
+    pub fn load_range_with_autoplay(
+        &self,
+        path: PathBuf,
+        start: f64,
+        end: Option<f64>,
+        autoplay: bool,
+    ) {
         let _ = self.tx.send(Command::Load {
             path,
             start: start.max(0.0),
             end,
+            autoplay,
         });
     }
 
@@ -389,6 +403,63 @@ impl AudioEngine {
 
 pub fn diagnose_wasapi() -> Vec<String> {
     wasapi_exclusive::diagnose()
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AsioStatus {
+    pub enabled: bool,
+    pub driver_found: bool,
+    pub drivers: Vec<String>,
+    pub message: String,
+}
+
+pub fn asio_status() -> AsioStatus {
+    let mut drivers = Vec::new();
+    for directory in [
+        r"C:\Windows\System32",
+        r"C:\Windows\SysWOW64",
+        r"C:\Program Files\ASIO",
+        r"C:\Program Files (x86)\ASIO",
+    ] {
+        if let Ok(entries) = std::fs::read_dir(directory) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                let lower = name.to_ascii_lowercase();
+                if lower.contains("asio") && lower.ends_with(".dll") {
+                    drivers.push(name);
+                }
+            }
+        }
+    }
+    drivers.sort();
+    drivers.dedup();
+
+    let driver_found = !drivers.is_empty();
+    let enabled = cfg!(feature = "asio");
+    let message = if enabled && driver_found {
+        format!(
+            "ASIO 后端已启用，检测到驱动：{}。可在输出模式中选择 ASIO。",
+            drivers.join("、")
+        )
+    } else if enabled {
+        "ASIO 后端已启用，但未检测到 ASIO 驱动。".to_string()
+    } else if driver_found {
+        format!(
+            "检测到 ASIO 驱动：{}；当前构建未启用 ASIO 后端（需要 ASIO SDK / 合规构建），默认使用 WASAPI 独占或共享输出。",
+            drivers.join("、")
+        )
+    } else {
+        "未检测到 ASIO 驱动；当前构建未启用 ASIO 后端，默认使用 WASAPI 独占或共享输出。"
+            .to_string()
+    };
+
+    AsioStatus {
+        enabled,
+        driver_found,
+        drivers,
+        message,
+    }
 }
 
 struct TrackInfo {
@@ -1157,6 +1228,94 @@ fn sample_format_label(format: SampleFormat) -> &'static str {
     }
 }
 
+#[cfg(feature = "asio")]
+fn create_asio_output(
+    session: &mut Session,
+    shared: &Arc<Shared>,
+) -> Result<ActiveOutput, String> {
+    let host = cpal::host_from_id(cpal::HostId::Asio)
+        .map_err(|error| format!("无法初始化 ASIO 主机: {error}"))?;
+    let device = match host.default_output_device() {
+        Some(device) => device,
+        None => {
+            let mut devices = host
+                .output_devices()
+                .map_err(|error| format!("枚举 ASIO 设备失败: {error}"))?;
+            devices
+                .next()
+                .ok_or_else(|| "没有可用的 ASIO 输出设备".to_string())?
+        }
+    };
+    let supported = device
+        .default_output_config()
+        .map_err(|error| format!("ASIO 设备没有可用输出格式: {error}"))?;
+    let config: StreamConfig = supported.config();
+    let sample_format = supported.sample_format();
+    let rate = config.sample_rate.0;
+    let channels = config.channels as usize;
+    let name = device.name().unwrap_or_else(|_| "ASIO 设备".to_string());
+
+    session.configure_output(rate, channels);
+    let (producer, consumer) = make_ring(rate, channels);
+    let stream = match sample_format {
+        SampleFormat::F32 => build_stream::<f32>(
+            &device,
+            &config,
+            Arc::clone(&consumer),
+            Arc::clone(shared),
+        )?,
+        SampleFormat::I16 => build_stream::<i16>(
+            &device,
+            &config,
+            Arc::clone(&consumer),
+            Arc::clone(shared),
+        )?,
+        SampleFormat::U16 => build_stream::<u16>(
+            &device,
+            &config,
+            Arc::clone(&consumer),
+            Arc::clone(shared),
+        )?,
+        SampleFormat::F64 => build_stream::<f64>(
+            &device,
+            &config,
+            Arc::clone(&consumer),
+            Arc::clone(shared),
+        )?,
+        SampleFormat::I32 => build_stream::<i32>(
+            &device,
+            &config,
+            Arc::clone(&consumer),
+            Arc::clone(shared),
+        )?,
+        other => return Err(format!("ASIO 设备采样格式暂不支持: {other:?}")),
+    };
+    stream
+        .play()
+        .map_err(|error| format!("无法启动 ASIO 输出: {error}"))?;
+
+    if let Ok(mut meta) = shared.meta.lock() {
+        meta.output_mode = "ASIO".to_string();
+        meta.output_rate = rate;
+        meta.output_channels = channels;
+        meta.output_format = sample_format_label(sample_format).to_string();
+        meta.output_bits = sample_format_bits(sample_format);
+        meta.exclusive = true;
+        meta.device = name.clone();
+    }
+    eprintln!(
+        "audio output: ASIO {} Hz / {} ch / {:?} ({name})",
+        rate, channels, sample_format
+    );
+
+    Ok(ActiveOutput {
+        producer,
+        consumer,
+        mode: OutputMode::Asio,
+        _backend: Backend::Shared { _stream: stream },
+    })
+}
+
 fn create_active_output(
     pref: OutputMode,
     session: &mut Session,
@@ -1200,6 +1359,23 @@ fn create_active_output(
                 eprintln!("audio output: 独占不可用，回退共享模式：{e}");
                 shared.report_note("独占不可用，已回退 WASAPI 共享".to_string());
             }
+        }
+    }
+
+    if pref == OutputMode::Asio {
+        #[cfg(feature = "asio")]
+        {
+            match create_asio_output(session, shared) {
+                Ok(output) => return Ok(output),
+                Err(error) => {
+                    eprintln!("audio output: ASIO 不可用，回退共享：{error}");
+                    shared.report_note(format!("ASIO 不可用，已回退 WASAPI 共享：{error}"));
+                }
+            }
+        }
+        #[cfg(not(feature = "asio"))]
+        {
+            shared.report_note("当前构建未启用 ASIO 后端，已回退 WASAPI 共享".to_string());
         }
     }
 
@@ -1395,7 +1571,12 @@ where
         while let Ok(command) = rx.try_recv() {
             changed = true;
             match command {
-                Command::Load { path, start, end } => {
+                Command::Load {
+                    path,
+                    start,
+                    end,
+                    autoplay,
+                } => {
                     shared.playing.store(false, Ordering::Relaxed);
                     shared.finished.store(false, Ordering::Relaxed);
                     preloaded = None;
@@ -1459,7 +1640,7 @@ where
                                                 Some((Instant::now(), shared.snapshot().position));
                                         }
                                         output = Some(new_output);
-                                        shared.playing.store(true, Ordering::Relaxed);
+                                        shared.playing.store(autoplay, Ordering::Relaxed);
                                     }
                                     Err(e) => shared.report_error(e),
                                 },

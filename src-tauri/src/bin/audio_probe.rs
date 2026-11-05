@@ -729,7 +729,8 @@ fn usage() -> ! {
          \x20 audio_probe gapless <file>  # 预加载无缝换轨 + 换轨后倍速自检\n\
          \x20 audio_probe matrix <dir>    # 格式矩阵：解码与共享输出自检\n\
          \x20 audio_probe lyrics <file>   # 歌词解析自检\n\
-         \x20 audio_probe wasapi          # WASAPI 共享/独占格式能力诊断\n"
+         \x20 audio_probe wasapi          # WASAPI 设备矩阵 / 独占格式能力诊断\n\
+         \x20 audio_probe asio            # ASIO 驱动检测与后端状态\n"
     );
     std::process::exit(2);
 }
@@ -741,6 +742,15 @@ fn main() {
             eprintln!("错误: {err}");
             std::process::exit(1);
         }
+        return;
+    }
+    if args.len() >= 2 && args[1] == "asio" {
+        let status = matemusic_lib::audio::asio_status();
+        println!(
+            "enabled={} driverFound={} drivers={:?}",
+            status.enabled, status.driver_found, status.drivers
+        );
+        println!("{}", status.message);
         return;
     }
     if args.len() < 3 {

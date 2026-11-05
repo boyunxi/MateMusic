@@ -30,6 +30,34 @@ export type TrackPage = {
   tracks: LibraryTrack[];
 };
 
+export type AlbumRow = {
+  album: string;
+  albumArtist: string | null;
+  artist: string | null;
+  year: number | null;
+  trackCount: number;
+  duration: number;
+  coverPath: string | null;
+};
+
+export type ArtistRow = {
+  artist: string;
+  albumCount: number;
+  trackCount: number;
+  duration: number;
+  coverPath: string | null;
+};
+
+export type AlbumPage = {
+  total: number;
+  albums: AlbumRow[];
+};
+
+export type ArtistPage = {
+  total: number;
+  artists: ArtistRow[];
+};
+
 export type FolderRow = {
   id: number;
   path: string;
@@ -80,6 +108,38 @@ export const getTracks = (query: TrackQuery) =>
     sort: query.sort ?? null,
     limit: query.limit ?? 500,
     offset: query.offset ?? 0,
+  });
+export const getAlbums = (query: TrackQuery) =>
+  invoke<AlbumPage>("library_get_albums", {
+    search: query.search ?? null,
+    sort: query.sort ?? null,
+    limit: query.limit ?? 500,
+    offset: query.offset ?? 0,
+  });
+export const getArtists = (query: TrackQuery) =>
+  invoke<ArtistPage>("library_get_artists", {
+    search: query.search ?? null,
+    sort: query.sort ?? null,
+    limit: query.limit ?? 500,
+    offset: query.offset ?? 0,
+  });
+export const getAlbumTracks = (
+  album: string,
+  albumArtist: string | null,
+  limit = 1000,
+  offset = 0,
+) =>
+  invoke<TrackPage>("library_get_album_tracks", {
+    album,
+    albumArtist,
+    limit,
+    offset,
+  });
+export const getArtistTracks = (artist: string, limit = 1000, offset = 0) =>
+  invoke<TrackPage>("library_get_artist_tracks", {
+    artist,
+    limit,
+    offset,
   });
 export const getFolders = () => invoke<FolderRow[]>("library_get_folders");
 export const getStats = () => invoke<LibraryStats>("library_stats");

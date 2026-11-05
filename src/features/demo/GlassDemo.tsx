@@ -39,6 +39,7 @@ import {
   X,
 } from "lucide-react";
 import {
+  getAsioStatus,
   getPlayerState,
   getSmtcAvailable,
   inTauri,
@@ -55,7 +56,7 @@ import {
   subscribePlayer,
   subscribeShortcut,
 } from "../../lib/player";
-import type { PlayerSnapshot } from "../../lib/player";
+import type { AsioStatus, PlayerSnapshot } from "../../lib/player";
 import { formatHz, formatTime, prettifyCodec } from "../../lib/format";
 import {
   cancelScan,
@@ -263,12 +264,16 @@ export default function GlassDemo() {
   const [snapshot, setSnapshot] = useState<PlayerSnapshot | null>(null);
   const [opening, setOpening] = useState(false);
   const [bridgeError, setBridgeError] = useState<string | null>(null);
-  const [outputPreference, setOutputPreference] = useState<"exclusive" | "shared">("exclusive");
+  const [outputPreference, setOutputPreference] = useState<
+    "exclusive" | "shared" | "asio"
+  >("exclusive");
   const [immersive, setImmersive] = useState(false);
   const [queueOpen, setQueueOpen] = useState(() =>
     typeof window === "undefined" ? true : window.innerWidth > 1180,
   );
   const [smtcReady, setSmtcReady] = useState<boolean | null>(null);
+  const [asioStatus, setAsioStatus] = useState<AsioStatus | null>(null);
+  const [globalLyricOffset, setGlobalLyricOffset] = useState(0);
   const shortcutRef = useRef<(action: string) => void>(() => {});
 
   const view = useAppStore((state) => state.view);
@@ -389,6 +394,21 @@ export default function GlassDemo() {
   }, [view]);
 
   useEffect(() => {
+    if (!inTauri) return;
+    let cancelled = false;
+    void getAsioStatus()
+      .then((status) => {
+        if (!cancelled) setAsioStatus(status);
+      })
+      .catch(() => {
+        if (!cancelled) setAsioStatus(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
     if (!inTauri || !loaded) return;
     void setSmtcMetadata({
       title: displayTitle,
@@ -438,13 +458,23 @@ export default function GlassDemo() {
         if (Number.isFinite(storedVolume) && storedVolume >= 0 && storedVolume <= 1) {
           setVolume(storedVolume);
         }
-        if (settings.outputMode === "exclusive" || settings.outputMode === "shared") {
+        if (
+          settings.outputMode === "exclusive" ||
+          settings.outputMode === "shared" ||
+          settings.outputMode === "asio"
+        ) {
           setOutputPreference(settings.outputMode);
         }
         const storedSpeed = Number(settings.playbackSpeed);
         if (SPEED_OPTIONS.includes(storedSpeed)) {
           setSpeed(storedSpeed);
           void setPlaybackSpeed(storedSpeed);
+        }
+        const storedGlobalLyricOffset = Number(settings.lyricOffsetGlobal);
+        if (Number.isFinite(storedGlobalLyricOffset)) {
+          setGlobalLyricOffset(
+            Math.max(-10000, Math.min(10000, Math.round(storedGlobalLyricOffset))),
+          );
         }
         for (const [key, value] of Object.entries(settings)) {
           if (key.startsWith("lyricOffset:")) {
@@ -485,7 +515,51 @@ export default function GlassDemo() {
               const index = Math.max(0, Math.min(state.currentIndex, restored.length - 1));
               useAppStore.getState().restore(restored, index, mode);
               const engine = await getPlayerState();
-              if (!engine.loaded) useAppStore.getState().setView("library");
+              if (!engine.loaded) {
+                const track = restored[index];
+                if (track) {
+                  const unsupported = /\.(ape|wma|opus|dsf|dff)$/i.test(track.path);
+                  if (unsupported) {
+                    pushToast({
+                      kind: "warning",
+                      message: "上次播放的曲目缺少解码器，未自动恢复。",
+                      duration: 6000,
+                    });
+                    useAppStore.getState().setView("library");
+                  } else {
+                    const savedPosition = Math.max(0, Number(state.position) || 0);
+                    const safeMax = track.duration > 0 ? Math.max(0, track.duration - 0.5) : 0;
+                    const position = Math.min(savedPosition, safeMax);
+                    try {
+                      await loadTrack(
+                        track.path,
+                        track.cueStart ?? null,
+                        track.cueEnd ?? null,
+                        false,
+                      );
+                      if (position > 0.05) await seekTrack(position);
+                      positionRef.current = position;
+                      useAppStore.getState().setView("now");
+                      if (position > 0.5) {
+                        pushToast({
+                          kind: "info",
+                          message: `已恢复上次播放位置 ${formatTime(position)}`,
+                          duration: 4200,
+                        });
+                      }
+                    } catch (error) {
+                      pushToast({
+                        kind: "warning",
+                        message: `上次播放位置恢复失败：${String(error)}`,
+                        duration: 6000,
+                      });
+                      useAppStore.getState().setView("library");
+                    }
+                  }
+                } else {
+                  useAppStore.getState().setView("library");
+                }
+              }
             }
           }
         }
@@ -634,6 +708,11 @@ export default function GlassDemo() {
     void setSetting("playbackSpeed", String(speed));
   }, [speed]);
 
+  useEffect(() => {
+    if (!inTauri || !settingsLoaded.current) return;
+    void setSetting("lyricOffsetGlobal", String(globalLyricOffset));
+  }, [globalLyricOffset]);
+
   // 演示模式的模拟时钟
   useEffect(() => {
     if (real || !playing) return;
@@ -696,9 +775,11 @@ export default function GlassDemo() {
   useEffect(() => {
     if (!inTauri) return;
     const next = queueAligned && nextIndex != null ? queue[nextIndex] : null;
+    const playable =
+      next && !/\.(ape|wma|opus|dsf|dff)$/i.test(next.path) ? next : null;
     void setPlayerNext(
-      next
-        ? { path: next.path, start: next.cueStart ?? 0, end: next.cueEnd ?? null }
+      playable
+        ? { path: playable.path, start: playable.cueStart ?? 0, end: playable.cueEnd ?? null }
         : null,
     );
   }, [
@@ -765,6 +846,10 @@ export default function GlassDemo() {
     setNextRefresh((value) => value + 1);
   };
 
+  const changeGlobalLyricOffset = (value: number) => {
+    setGlobalLyricOffset(Math.max(-10000, Math.min(10000, Math.round(value))));
+  };
+
   const changeLyricOffset = (value: number) => {
     const clamped = Math.max(-10000, Math.min(10000, Math.round(value)));
     setManualLyricOffset(clamped);
@@ -801,7 +886,7 @@ export default function GlassDemo() {
     changeSpeed(SPEED_OPTIONS[(index + 1) % SPEED_OPTIONS.length]);
   };
 
-  const changeOutputMode = (mode: "exclusive" | "shared") => {
+  const changeOutputMode = (mode: "exclusive" | "shared" | "asio") => {
     setOutputPreference(mode);
     if (loaded) void setOutputMode(mode);
     setNextRefresh((value) => value + 1);
@@ -988,14 +1073,18 @@ export default function GlassDemo() {
               />
             </label>
             <p className="tuning-title is-spaced">输出模式</p>
-            <div className="segmented" role="group" aria-label="输出模式">
+            <div
+              className={`segmented ${asioStatus?.enabled ? "is-three" : ""}`}
+              role="group"
+              aria-label="输出模式"
+            >
               <button
                 type="button"
                 className={outputPreference === "exclusive" ? "is-active" : ""}
                 onClick={() => changeOutputMode("exclusive")}
                 aria-pressed={outputPreference === "exclusive"}
               >
-                独占优先
+                独占
               </button>
               <button
                 type="button"
@@ -1005,6 +1094,16 @@ export default function GlassDemo() {
               >
                 共享
               </button>
+              {asioStatus?.enabled && (
+                <button
+                  type="button"
+                  className={outputPreference === "asio" ? "is-active" : ""}
+                  onClick={() => changeOutputMode("asio")}
+                  aria-pressed={outputPreference === "asio"}
+                >
+                  ASIO
+                </button>
+              )}
             </div>
             <p className="tuning-title is-spaced">播放倍速</p>
             <div className="speed-options" role="group" aria-label="播放倍速">
@@ -1045,6 +1144,7 @@ export default function GlassDemo() {
                   error={lyricsError}
                   position={time + (queueTrack?.cueStart ?? 0)}
                   offsetMs={manualLyricOffset}
+                  globalOffsetMs={globalLyricOffset}
                   onOffsetChange={changeLyricOffset}
                   onSeek={seekTo}
                 />
@@ -1113,7 +1213,9 @@ export default function GlassDemo() {
                   <div className="settings-row">
                     <span>输出模式</span>
                     <div
-                      className="segmented settings-segment"
+                      className={`segmented settings-segment ${
+                        asioStatus?.enabled ? "is-three" : ""
+                      }`}
                       role="group"
                       aria-label="输出模式"
                     >
@@ -1123,7 +1225,7 @@ export default function GlassDemo() {
                         onClick={() => changeOutputMode("exclusive")}
                         aria-pressed={outputPreference === "exclusive"}
                       >
-                        独占优先
+                        独占
                       </button>
                       <button
                         type="button"
@@ -1133,6 +1235,16 @@ export default function GlassDemo() {
                       >
                         共享
                       </button>
+                      {asioStatus?.enabled && (
+                        <button
+                          type="button"
+                          className={outputPreference === "asio" ? "is-active" : ""}
+                          onClick={() => changeOutputMode("asio")}
+                          aria-pressed={outputPreference === "asio"}
+                        >
+                          ASIO
+                        </button>
+                      )}
                     </div>
                   </div>
                   <div className="settings-row is-stack">
@@ -1172,6 +1284,37 @@ export default function GlassDemo() {
                 </section>
 
                 <section className="settings-card">
+                  <h2>歌词</h2>
+                  <div className="settings-row">
+                    <span>全局偏移</span>
+                    <em>
+                      {globalLyricOffset > 0 ? "+" : ""}
+                      {globalLyricOffset} ms
+                    </em>
+                  </div>
+                  <div className="settings-offset-actions">
+                    <button
+                      type="button"
+                      onClick={() => changeGlobalLyricOffset(globalLyricOffset - 100)}
+                    >
+                      -0.1s
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => changeGlobalLyricOffset(globalLyricOffset + 100)}
+                    >
+                      +0.1s
+                    </button>
+                    <button type="button" onClick={() => changeGlobalLyricOffset(0)}>
+                      归零
+                    </button>
+                  </div>
+                  <p className="settings-card-note">
+                    叠加在歌词内 offset 与单曲偏移之上，对所有曲目生效。
+                  </p>
+                </section>
+
+                <section className="settings-card">
                   <h2>系统</h2>
                   <div className="settings-row">
                     <span>系统媒体控制</span>
@@ -1179,6 +1322,21 @@ export default function GlassDemo() {
                       {smtcReady == null ? "检测中…" : smtcReady ? "已接入" : "不可用"}
                     </em>
                   </div>
+                  <div className="settings-row">
+                    <span>ASIO</span>
+                    <em className={asioStatus?.enabled ? "is-good" : "is-muted"}>
+                      {asioStatus == null
+                        ? "检测中…"
+                        : asioStatus.enabled
+                          ? "已启用"
+                          : asioStatus.driverFound
+                            ? "驱动已检测 / 未启用"
+                            : "未检测到驱动"}
+                    </em>
+                  </div>
+                  {asioStatus && (
+                    <p className="settings-card-note">{asioStatus.message}</p>
+                  )}
                   <div className="settings-row">
                     <span>全局快捷键</span>
                     <em>Ctrl + Alt</em>
@@ -1353,6 +1511,7 @@ export default function GlassDemo() {
                     error={lyricsError}
                     position={time + (queueTrack?.cueStart ?? 0)}
                     offsetMs={manualLyricOffset}
+                    globalOffsetMs={globalLyricOffset}
                     onOffsetChange={changeLyricOffset}
                     onSeek={seekTo}
                   />
