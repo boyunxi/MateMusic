@@ -76,7 +76,7 @@ fn find_external(audio: &Path) -> Option<(PathBuf, String)> {
     None
 }
 
-fn decode_text(bytes: &[u8], requested: Option<&str>) -> Result<(String, String), String> {
+pub(crate) fn decode_text(bytes: &[u8], requested: Option<&str>) -> Result<(String, String), String> {
     if let Some(label) = requested {
         let encoding = Encoding::for_label(label.as_bytes())
             .ok_or_else(|| format!("未知歌词编码: {label}"))?;

@@ -20,6 +20,9 @@ export type LibraryTrack = {
   channels: number | null;
   bitrate: number | null;
   coverPath: string | null;
+  cuePath: string | null;
+  cueStart: number | null;
+  cueEnd: number | null;
 };
 
 export type TrackPage = {

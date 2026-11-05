@@ -1,10 +1,11 @@
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension};
 use symphonia::core::codecs::DecoderOptions;
 use symphonia::core::formats::{FormatOptions, SeekMode, SeekTo};
 use symphonia::core::io::MediaSourceStream;
@@ -14,7 +15,8 @@ use symphonia::core::units::Time;
 use tauri::{AppHandle, Emitter};
 use walkdir::WalkDir;
 
-use super::{db, now_secs, path_string, ScanStatus};
+use super::{cue, db, now_secs, path_string, ScanStatus};
+use crate::lyrics::decode_text;
 
 const AUDIO_EXTENSIONS: &[&str] = &[
     "flac", "mp3", "m4a", "mp4", "aac", "ogg", "opus", "wav", "aiff", "aif", "alac", "ape",
@@ -281,13 +283,19 @@ fn mtime_secs(path: &Path) -> i64 {
 
 const UPSERT_TRACK: &str = r#"
 INSERT INTO tracks (
-    path, folder_id, title, artist, album, album_artist, track_no, disc_no, year, genre,
-    duration, codec, sample_rate, bits, channels, bitrate, size, mtime, cover_path, added_at, updated_at
+    source_key, path, cue_path, cue_start, cue_end, folder_id, title, artist, album, album_artist,
+    track_no, disc_no, year, genre, duration, codec, sample_rate, bits, channels, bitrate, size,
+    mtime, cover_path, added_at, updated_at
 ) VALUES (
     ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
-    ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21
+    ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20,
+    ?21, ?22, ?23, ?24, ?25
 )
-ON CONFLICT(path) DO UPDATE SET
+ON CONFLICT(source_key) DO UPDATE SET
+    path = excluded.path,
+    cue_path = excluded.cue_path,
+    cue_start = excluded.cue_start,
+    cue_end = excluded.cue_end,
     folder_id = excluded.folder_id,
     title = excluded.title,
     artist = excluded.artist,
@@ -308,6 +316,114 @@ ON CONFLICT(path) DO UPDATE SET
     cover_path = excluded.cover_path,
     updated_at = excluded.updated_at
 "#;
+
+struct CueInfo {
+    cue_path: String,
+    album: Option<String>,
+    performer: Option<String>,
+    tracks: Vec<cue::CueTrack>,
+}
+
+struct TrackRecord {
+    source_key: String,
+    path: String,
+    cue_path: Option<String>,
+    cue_start: Option<f64>,
+    cue_end: Option<f64>,
+    folder_id: i64,
+    title: String,
+    artist: Option<String>,
+    album: Option<String>,
+    album_artist: Option<String>,
+    track_no: Option<u32>,
+    disc_no: Option<u32>,
+    year: Option<u32>,
+    genre: Option<String>,
+    duration: f64,
+    codec: String,
+    sample_rate: Option<u32>,
+    bits: Option<u32>,
+    channels: Option<u32>,
+    bitrate: Option<u32>,
+    size: i64,
+    mtime: i64,
+    cover_path: Option<String>,
+}
+
+fn normalized_key(path: &Path) -> String {
+    let canonical = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    path_string(&canonical).to_ascii_lowercase()
+}
+
+fn upsert_track(conn: &Connection, record: &TrackRecord) -> Result<(), String> {
+    let now = now_secs();
+    conn.execute(
+        UPSERT_TRACK,
+        params![
+            &record.source_key,
+            &record.path,
+            &record.cue_path,
+            record.cue_start,
+            record.cue_end,
+            record.folder_id,
+            &record.title,
+            &record.artist,
+            &record.album,
+            &record.album_artist,
+            record.track_no,
+            record.disc_no,
+            record.year,
+            &record.genre,
+            record.duration,
+            &record.codec,
+            record.sample_rate,
+            record.bits,
+            record.channels,
+            record.bitrate,
+            record.size,
+            record.mtime,
+            &record.cover_path,
+            now,
+            now
+        ],
+    )
+    .map_err(|e| format!("写入曲目失败: {e}"))?;
+    Ok(())
+}
+
+fn track_exists(
+    conn: &Connection,
+    source_key: &str,
+    size: i64,
+    mtime: i64,
+) -> Result<bool, String> {
+    let existing: Option<(i64, i64)> = conn
+        .query_row(
+            "SELECT size, mtime FROM tracks WHERE source_key = ?1",
+            [source_key],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(|e| format!("查询曲目失败: {e}"))?;
+    Ok(existing == Some((size, mtime)))
+}
+
+fn update_status(
+    status: &Arc<Mutex<ScanStatus>>,
+    scanned: u64,
+    imported: u64,
+    skipped: u64,
+    errors: u64,
+    current: &str,
+) {
+    if let Ok(mut status) = status.lock() {
+        status.scanned = scanned;
+        status.imported = imported;
+        status.skipped = skipped;
+        status.errors = errors;
+        status.current = current.to_string();
+    }
+}
 
 pub fn run(
     app: AppHandle,
@@ -358,6 +474,60 @@ fn run_inner(
     let mut skipped = 0u64;
     let mut errors = 0u64;
     let mut last_emit = Instant::now() - Duration::from_secs(1);
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut cue_map: HashMap<String, CueInfo> = HashMap::new();
+
+    // 先收集 CUE，建立「音频文件 -> 虚拟分轨」映射
+    for entry in WalkDir::new(root).follow_links(false).into_iter().filter_map(|e| e.ok()) {
+        if cancel.load(Ordering::Relaxed) {
+            break;
+        }
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let is_cue = entry
+            .path()
+            .extension()
+            .and_then(|value| value.to_str())
+            .map(|value| value.eq_ignore_ascii_case("cue"))
+            .unwrap_or(false);
+        if !is_cue {
+            continue;
+        }
+
+        let bytes = match fs::read(entry.path()) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                errors += 1;
+                eprintln!("cue read error {}: {error}", entry.path().display());
+                continue;
+            }
+        };
+        let text = match decode_text(&bytes, None) {
+            Ok((text, _)) => text,
+            Err(error) => {
+                errors += 1;
+                eprintln!("cue decode error {}: {error}", entry.path().display());
+                continue;
+            }
+        };
+        for group in cue::parse_cue(&text) {
+            let directory = entry.path().parent().unwrap_or_else(|| Path::new(root));
+            let audio = directory.join(&group.file);
+            if !audio.is_file() {
+                continue;
+            }
+            cue_map.insert(
+                normalized_key(&audio),
+                CueInfo {
+                    cue_path: path_string(entry.path()),
+                    album: group.album,
+                    performer: group.performer,
+                    tracks: group.tracks,
+                },
+            );
+        }
+    }
 
     for entry in WalkDir::new(root).follow_links(false).into_iter().filter_map(|e| e.ok()) {
         if cancel.load(Ordering::Relaxed) {
@@ -373,19 +543,9 @@ fn run_inner(
 
         let size = fs::metadata(path).map(|meta| meta.len() as i64).unwrap_or(0);
         let mtime = mtime_secs(path);
+        let key = normalized_key(path);
 
-        let existing: Option<(i64, i64)> = conn
-            .query_row(
-                "SELECT size, mtime FROM tracks WHERE path = ?1",
-                [path_str.as_str()],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()
-            .map_err(|e| format!("查询曲目失败: {e}"))?;
-
-        if existing == Some((size, mtime)) {
-            skipped += 1;
-        } else {
+        if let Some(cue_info) = cue_map.get(&key) {
             let parsed = match parse_metadata(path, size) {
                 Ok(parsed) => parsed,
                 Err(error) => {
@@ -397,51 +557,133 @@ fn run_inner(
             let cover_path = parsed
                 .cover
                 .as_ref()
-                .and_then(|(data, media_type)| {
-                    save_cover(covers_dir, path, data, media_type)
-                });
-            let now = now_secs();
+                .and_then(|(data, media_type)| save_cover(covers_dir, path, data, media_type));
 
             conn.execute(
-                UPSERT_TRACK,
-                params![
-                    &path_str,
+                "DELETE FROM tracks WHERE path = ?1 AND cue_path IS NULL",
+                [path_str.as_str()],
+            )
+            .map_err(|e| format!("清理旧曲目失败: {e}"))?;
+
+            for track in &cue_info.tracks {
+                let source_key = format!("{}#{}", path_str, (track.start * 1000.0).round() as i64);
+                seen.insert(source_key.clone());
+
+                if track_exists(&conn, &source_key, size, mtime)? {
+                    skipped += 1;
+                    continue;
+                }
+
+                let duration = track
+                    .end
+                    .map(|end| (end - track.start).max(0.0))
+                    .unwrap_or_else(|| (parsed.duration - track.start).max(0.0));
+                let record = TrackRecord {
+                    source_key,
+                    path: path_str.clone(),
+                    cue_path: Some(cue_info.cue_path.clone()),
+                    cue_start: Some(track.start),
+                    cue_end: track.end,
                     folder_id,
-                    parsed.title,
-                    parsed.artist,
-                    parsed.album,
-                    parsed.album_artist,
-                    parsed.track_no,
-                    parsed.disc_no,
-                    parsed.year,
-                    parsed.genre,
-                    parsed.duration,
-                    parsed.codec,
-                    parsed.sample_rate,
-                    parsed.bits,
-                    parsed.channels,
-                    parsed.bitrate,
+                    title: track.title.clone(),
+                    artist: track
+                        .performer
+                        .clone()
+                        .or_else(|| cue_info.performer.clone())
+                        .or_else(|| parsed.artist.clone()),
+                    album: cue_info.album.clone().or_else(|| parsed.album.clone()),
+                    album_artist: cue_info
+                        .performer
+                        .clone()
+                        .or_else(|| parsed.album_artist.clone()),
+                    track_no: Some(track.number),
+                    disc_no: parsed.disc_no,
+                    year: parsed.year,
+                    genre: parsed.genre.clone(),
+                    duration,
+                    codec: parsed.codec.clone(),
+                    sample_rate: parsed.sample_rate,
+                    bits: parsed.bits,
+                    channels: parsed.channels,
+                    bitrate: parsed.bitrate,
+                    size,
+                    mtime,
+                    cover_path: cover_path.clone(),
+                };
+                upsert_track(&conn, &record)?;
+                imported += 1;
+            }
+        } else {
+            let source_key = path_str.clone();
+            seen.insert(source_key.clone());
+
+            if track_exists(&conn, &source_key, size, mtime)? {
+                skipped += 1;
+            } else {
+                let parsed = match parse_metadata(path, size) {
+                    Ok(parsed) => parsed,
+                    Err(error) => {
+                        errors += 1;
+                        eprintln!("metadata error {}: {error}", path.display());
+                        fallback(path, size)
+                    }
+                };
+                let cover_path = parsed
+                    .cover
+                    .as_ref()
+                    .and_then(|(data, media_type)| save_cover(covers_dir, path, data, media_type));
+                let record = TrackRecord {
+                    source_key,
+                    path: path_str.clone(),
+                    cue_path: None,
+                    cue_start: None,
+                    cue_end: None,
+                    folder_id,
+                    title: parsed.title,
+                    artist: parsed.artist,
+                    album: parsed.album,
+                    album_artist: parsed.album_artist,
+                    track_no: parsed.track_no,
+                    disc_no: parsed.disc_no,
+                    year: parsed.year,
+                    genre: parsed.genre,
+                    duration: parsed.duration,
+                    codec: parsed.codec,
+                    sample_rate: parsed.sample_rate,
+                    bits: parsed.bits,
+                    channels: parsed.channels,
+                    bitrate: parsed.bitrate,
                     size,
                     mtime,
                     cover_path,
-                    now,
-                    now
-                ],
-            )
-            .map_err(|e| format!("写入曲目失败: {e}"))?;
-            imported += 1;
+                };
+                upsert_track(&conn, &record)?;
+                imported += 1;
+            }
         }
 
-        if let Ok(mut status) = status.lock() {
-            status.scanned = scanned;
-            status.imported = imported;
-            status.skipped = skipped;
-            status.errors = errors;
-            status.current = path_str;
-        }
+        update_status(status, scanned, imported, skipped, errors, &path_str);
         if last_emit.elapsed() >= Duration::from_millis(200) {
             emit_progress(app, status);
             last_emit = Instant::now();
+        }
+    }
+
+    if !cancel.load(Ordering::Relaxed) {
+        let existing_keys: Vec<String> = {
+            let mut stmt = conn
+                .prepare("SELECT source_key FROM tracks WHERE folder_id = ?1")
+                .map_err(|e| format!("查询旧曲目失败: {e}"))?;
+            let rows = stmt
+                .query_map([folder_id], |row| row.get::<_, String>(0))
+                .map_err(|e| format!("查询旧曲目失败: {e}"))?;
+            rows.filter_map(|row| row.ok()).collect()
+        };
+        for key in existing_keys {
+            if !seen.contains(&key) {
+                conn.execute("DELETE FROM tracks WHERE source_key = ?1", [key])
+                    .map_err(|e| format!("清理旧曲目失败: {e}"))?;
+            }
         }
     }
 
@@ -451,17 +693,9 @@ fn run_inner(
     )
     .map_err(|e| format!("更新目录时间失败: {e}"))?;
 
-    if let Ok(mut status) = status.lock() {
-        status.scanned = scanned;
-        status.imported = imported;
-        status.skipped = skipped;
-        status.errors = errors;
-        status.current.clear();
-    }
-
+    update_status(status, scanned, imported, skipped, errors, "");
     Ok(())
 }
-
 fn emit_progress(app: &AppHandle, status: &Arc<Mutex<ScanStatus>>) {
     if let Ok(status) = status.lock() {
         let _ = app.emit("scan://progress", status.clone());

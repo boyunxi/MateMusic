@@ -1,3 +1,4 @@
+mod cue;
 mod db;
 mod scan;
 
@@ -103,6 +104,9 @@ pub struct TrackRow {
     pub channels: Option<u32>,
     pub bitrate: Option<u32>,
     pub cover_path: Option<String>,
+    pub cue_path: Option<String>,
+    pub cue_start: Option<f64>,
+    pub cue_end: Option<f64>,
 }
 
 #[derive(Serialize)]
@@ -149,7 +153,7 @@ pub struct PlaylistRow {
     pub track_count: i64,
 }
 
-const TRACK_COLUMNS: &str = "id, path, title, artist, album, album_artist, track_no, disc_no, year, genre, duration, codec, sample_rate, bits, channels, bitrate, cover_path";
+const TRACK_COLUMNS: &str = "id, path, title, artist, album, album_artist, track_no, disc_no, year, genre, duration, codec, sample_rate, bits, channels, bitrate, cover_path, cue_path, cue_start, cue_end";
 
 fn opt_u32(row: &Row<'_>, index: usize) -> rusqlite::Result<Option<u32>> {
     Ok(row
@@ -176,6 +180,9 @@ fn map_track(row: &Row<'_>) -> rusqlite::Result<TrackRow> {
         channels: opt_u32(row, 14)?,
         bitrate: opt_u32(row, 15)?,
         cover_path: row.get(16)?,
+        cue_path: row.get(17)?,
+        cue_start: row.get(18)?,
+        cue_end: row.get(19)?,
     })
 }
 
@@ -590,7 +597,7 @@ pub fn playlist_get_tracks(
 ) -> Result<Vec<TrackRow>, String> {
     let conn = state.conn()?;
     let sql = format!(
-        "SELECT t.id, t.path, t.title, t.artist, t.album, t.album_artist, t.track_no, t.disc_no, t.year, t.genre, t.duration, t.codec, t.sample_rate, t.bits, t.channels, t.bitrate, t.cover_path
+        "SELECT t.id, t.path, t.title, t.artist, t.album, t.album_artist, t.track_no, t.disc_no, t.year, t.genre, t.duration, t.codec, t.sample_rate, t.bits, t.channels, t.bitrate, t.cover_path, t.cue_path, t.cue_start, t.cue_end
          FROM playlist_tracks pt JOIN tracks t ON t.id = pt.track_id
          WHERE pt.playlist_id = ?1 ORDER BY pt.position"
     );

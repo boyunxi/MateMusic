@@ -52,7 +52,16 @@ export async function pickAudioFile(): Promise<string | null> {
   return typeof selected === "string" ? selected : null;
 }
 
-export const loadTrack = (path: string) => invoke<void>("player_load", { path });
+export const loadTrack = (
+  path: string,
+  start?: number | null,
+  end?: number | null,
+) =>
+  invoke<void>("player_load", {
+    path,
+    start: start ?? null,
+    end: end ?? null,
+  });
 export const playTrack = () => invoke<void>("player_play");
 export const pauseTrack = () => invoke<void>("player_pause");
 export const seekTrack = (position: number) => invoke<void>("player_seek", { position });

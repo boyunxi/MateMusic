@@ -606,7 +606,9 @@ export default function GlassDemo() {
   };
 
   const seekTo = (seconds: number) => {
-    const clamped = Math.max(0, duration > 0 ? Math.min(seconds, duration) : seconds);
+    const cueStart = queueTrack?.cueStart ?? 0;
+    const relative = Math.max(0, seconds - cueStart);
+    const clamped = duration > 0 ? Math.min(relative, duration) : relative;
     setTime(clamped);
     if (loaded) void seekTrack(clamped);
   };
@@ -803,7 +805,7 @@ export default function GlassDemo() {
                   doc={lyrics}
                   loading={lyricsLoading}
                   error={lyricsError}
-                  position={time}
+                  position={time + (queueTrack?.cueStart ?? 0)}
                   offsetMs={manualLyricOffset}
                   onOffsetChange={changeLyricOffset}
                   onSeek={seekTo}
@@ -926,7 +928,7 @@ export default function GlassDemo() {
                     doc={lyrics}
                     loading={lyricsLoading}
                     error={lyricsError}
-                    position={time}
+                    position={time + (queueTrack?.cueStart ?? 0)}
                     offsetMs={manualLyricOffset}
                     onOffsetChange={changeLyricOffset}
                     onSeek={seekTo}

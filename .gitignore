@@ -12,3 +12,4 @@ tests/preview-*.png
 .DS_Store
 .idea/
 .vscode/
+tests/samples/cue/*.wav

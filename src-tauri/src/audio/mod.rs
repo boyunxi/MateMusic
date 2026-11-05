@@ -176,7 +176,11 @@ impl Shared {
 }
 
 enum Command {
-    Load(PathBuf),
+    Load {
+        path: PathBuf,
+        start: f64,
+        end: Option<f64>,
+    },
     Play,
     Pause,
     Seek(f64),
@@ -207,7 +211,15 @@ impl AudioEngine {
     }
 
     pub fn load(&self, path: PathBuf) {
-        let _ = self.tx.send(Command::Load(path));
+        self.load_range(path, 0.0, None);
+    }
+
+    pub fn load_range(&self, path: PathBuf, start: f64, end: Option<f64>) {
+        let _ = self.tx.send(Command::Load {
+            path,
+            start: start.max(0.0),
+            end,
+        });
     }
 
     pub fn play(&self) {
@@ -249,7 +261,6 @@ struct TrackInfo {
     sample_rate: u32,
     bits: Option<u32>,
     channels: usize,
-    duration: f64,
 }
 
 struct LinearResampler {
@@ -537,6 +548,13 @@ struct Session {
     sample_spec: Option<(u32, usize)>,
     pending: Vec<f32>,
     finished: bool,
+    file_duration: f64,
+    segment_start: f64,
+    segment_duration: f64,
+    out_rate: u32,
+    out_channels: usize,
+    emitted_frames: u64,
+    frames_limit: Option<u64>,
 }
 
 impl Session {
@@ -640,7 +658,6 @@ impl Session {
             sample_rate,
             bits,
             channels,
-            duration,
         };
 
         let session = Self {
@@ -655,6 +672,13 @@ impl Session {
             sample_spec: None,
             pending: Vec::new(),
             finished: false,
+            file_duration: duration,
+            segment_start: 0.0,
+            segment_duration: duration,
+            out_rate: 0,
+            out_channels: 0,
+            emitted_frames: 0,
+            frames_limit: None,
         };
 
         Ok((session, info))
@@ -664,11 +688,54 @@ impl Session {
         self.resampler =
             OutputResampler::new(self.src_rate, self.src_channels, out_rate, out_channels);
         self.pending.clear();
+        self.out_rate = out_rate;
+        self.out_channels = out_channels.max(1);
+        self.emitted_frames = 0;
+        self.frames_limit = self.limit_for_offset(0.0);
+    }
+
+    fn set_range(&mut self, start: f64, end: Option<f64>) {
+        self.segment_start = start.max(0.0);
+        self.segment_duration = match end {
+            Some(end) => (end - self.segment_start).max(0.0),
+            None => (self.file_duration - self.segment_start).max(0.0),
+        };
+        self.emitted_frames = 0;
+        self.frames_limit = self.limit_for_offset(0.0);
+    }
+
+    fn limit_for_offset(&self, offset: f64) -> Option<u64> {
+        if self.out_rate == 0 || self.segment_duration <= 0.0 {
+            return None;
+        }
+        let remaining = (self.segment_duration - offset.max(0.0)).max(0.0);
+        Some((remaining * self.out_rate as f64).round() as u64)
+    }
+
+    fn remaining_output_samples(&self) -> Option<usize> {
+        self.frames_limit.map(|limit| {
+            let remaining = limit.saturating_sub(self.emitted_frames);
+            (remaining as usize).saturating_mul(self.out_channels.max(1))
+        })
+    }
+
+    fn record_emitted(&mut self, samples: usize) {
+        if samples == 0 {
+            return;
+        }
+        self.emitted_frames += (samples / self.out_channels.max(1)) as u64;
+        if let Some(limit) = self.frames_limit {
+            if self.emitted_frames >= limit {
+                self.finished = true;
+                self.pending.clear();
+            }
+        }
     }
 
     fn seek(&mut self, secs: f64) -> Result<(), String> {
-        let secs = secs.max(0.0);
-        let time = Time::new(secs as u64, secs.fract());
+        let relative = secs.max(0.0);
+        let absolute = self.segment_start + relative;
+        let time = Time::new(absolute as u64, absolute.fract());
         self.format
             .seek(
                 SeekMode::Accurate,
@@ -684,6 +751,8 @@ impl Session {
         self.sample_spec = None;
         self.pending.clear();
         self.finished = false;
+        self.emitted_frames = 0;
+        self.frames_limit = self.limit_for_offset(relative);
         Ok(())
     }
 
@@ -1092,7 +1161,7 @@ where
         while let Ok(command) = rx.try_recv() {
             changed = true;
             match command {
-                Command::Load(path) => {
+                Command::Load { path, start, end } => {
                     shared.playing.store(false, Ordering::Relaxed);
                     shared.finished.store(false, Ordering::Relaxed);
                     output = None;
@@ -1104,6 +1173,23 @@ where
 
                     match Session::open(&path) {
                         Ok((mut new_session, info)) => {
+                            new_session.set_range(start, end);
+                            if end.is_some() && new_session.segment_duration <= 0.0 {
+                                let error = "分轨区间无效：结束时间必须大于开始时间".to_string();
+                                shared.report_error(error.clone());
+                                if let Ok(mut meta) = shared.meta.lock() {
+                                    meta.loaded = false;
+                                    meta.duration = 0.0;
+                                    meta.error = Some(error);
+                                }
+                                continue;
+                            }
+                            if start > 0.0 {
+                                if let Err(error) = new_session.seek(0.0) {
+                                    shared.report_error(format!("分轨定位失败: {error}"));
+                                    continue;
+                                }
+                            }
                             if let Ok(mut meta) = shared.meta.lock() {
                                 meta.loaded = true;
                                 meta.title = info.title;
@@ -1112,7 +1198,7 @@ where
                                 meta.sample_rate = info.sample_rate;
                                 meta.bits = info.bits;
                                 meta.channels = info.channels;
-                                meta.duration = info.duration;
+                                meta.duration = new_session.segment_duration;
                                 meta.error = None;
                                 meta.note = None;
                             }
@@ -1348,9 +1434,17 @@ where
         if let (Some(session), Some(output_ref)) = (session.as_mut(), output.as_mut()) {
             let producer_ref = &mut output_ref.producer;
             if !session.pending.is_empty() {
-                let pushed = producer_ref.push_slice(&session.pending);
-                if pushed > 0 {
-                    session.pending.drain(..pushed);
+                let max_samples = session.remaining_output_samples().unwrap_or(usize::MAX);
+                let take = session.pending.len().min(max_samples);
+                if take == 0 {
+                    session.finished = true;
+                    session.pending.clear();
+                } else {
+                    let pushed = producer_ref.push_slice(&session.pending[..take]);
+                    if pushed > 0 {
+                        session.pending.drain(..pushed);
+                        session.record_emitted(pushed);
+                    }
                 }
             }
 

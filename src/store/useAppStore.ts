@@ -28,7 +28,7 @@ export const useAppStore = create<AppState>((set, get) => {
     const track = queue[index];
     if (!track) return;
     set({ queue, currentIndex: index, view: "now" });
-    void loadTrack(track.path);
+    void loadTrack(track.path, track.cueStart ?? null, track.cueEnd ?? null);
   };
 
   return {

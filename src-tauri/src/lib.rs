@@ -28,9 +28,18 @@ fn app_info() -> AppInfo {
 }
 
 #[tauri::command]
-fn player_load(state: State<'_, EngineState>, path: String) {
+fn player_load(
+    state: State<'_, EngineState>,
+    path: String,
+    start: Option<f64>,
+    end: Option<f64>,
+) {
     if let Ok(engine) = state.0.lock() {
-        engine.load(PathBuf::from(path));
+        engine.load_range(
+            PathBuf::from(path),
+            start.unwrap_or(0.0).max(0.0),
+            end,
+        );
     }
 }
 

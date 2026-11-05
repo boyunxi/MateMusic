@@ -1,0 +1,10 @@
+PERFORMER "Nova Fields"
+TITLE "Cue Album"
+FILE "tone-44100-16.wav" WAVE
+  TRACK 01 AUDIO
+    TITLE "Cue One"
+    PERFORMER "Cue Artist"
+    INDEX 01 00:00:00
+  TRACK 02 AUDIO
+    TITLE "Cue Two"
+    INDEX 01 00:02:00

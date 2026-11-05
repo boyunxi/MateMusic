@@ -89,6 +89,61 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             "ALTER TABLE playback_state ADD COLUMN current_index INTEGER NOT NULL DEFAULT -1;",
         )?;
         conn.execute_batch("PRAGMA user_version = 2;")?;
+        version = 2;
+    }
+    if version < 3 {
+        conn.execute_batch(
+            r#"
+CREATE TABLE tracks_v3 (
+    id           INTEGER PRIMARY KEY,
+    source_key   TEXT NOT NULL UNIQUE,
+    path         TEXT NOT NULL,
+    cue_path     TEXT,
+    cue_start    REAL,
+    cue_end      REAL,
+    folder_id    INTEGER REFERENCES folders(id) ON DELETE CASCADE,
+    title        TEXT NOT NULL,
+    artist       TEXT,
+    album        TEXT,
+    album_artist TEXT,
+    track_no     INTEGER,
+    disc_no      INTEGER,
+    year         INTEGER,
+    genre        TEXT,
+    duration     REAL NOT NULL DEFAULT 0,
+    codec        TEXT,
+    sample_rate  INTEGER,
+    bits         INTEGER,
+    channels     INTEGER,
+    bitrate      INTEGER,
+    size         INTEGER NOT NULL DEFAULT 0,
+    mtime        INTEGER NOT NULL DEFAULT 0,
+    cover_path   TEXT,
+    added_at     INTEGER NOT NULL,
+    updated_at   INTEGER NOT NULL
+);
+
+INSERT INTO tracks_v3 (
+    source_key, path, folder_id, title, artist, album, album_artist, track_no, disc_no,
+    year, genre, duration, codec, sample_rate, bits, channels, bitrate, size, mtime,
+    cover_path, added_at, updated_at
+)
+SELECT
+    path, path, folder_id, title, artist, album, album_artist, track_no, disc_no,
+    year, genre, duration, codec, sample_rate, bits, channels, bitrate, size, mtime,
+    cover_path, added_at, updated_at
+FROM tracks;
+
+DROP TABLE tracks;
+ALTER TABLE tracks_v3 RENAME TO tracks;
+
+CREATE INDEX IF NOT EXISTS idx_tracks_artist ON tracks(artist);
+CREATE INDEX IF NOT EXISTS idx_tracks_album ON tracks(album);
+CREATE INDEX IF NOT EXISTS idx_tracks_folder ON tracks(folder_id);
+
+PRAGMA user_version = 3;
+"#,
+        )?;
     }
     Ok(())
 }
