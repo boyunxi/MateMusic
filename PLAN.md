@@ -273,6 +273,7 @@ MateMusic/
 4. 后端：自主编写命令行 / 测试脚本，闭环验证解码、播放状态机、歌词时间轴与数据库逻辑，并汇报结果。
 5. 前端：保证 `typecheck`、`lint`、`build` 无报错；交互与视觉体验交由用户验收。
 6. 每轮实质性工作后追加工作日志到 `.workbuddy/memory/YYYY-MM-DD.md`。
+7. 构建环境：本项目使用 `rust-lld` 链接；机器上通过 Cargo 全局 `build.target-dir` 与 `CARGO_TARGET_DIR` 共享 `D:\Dev\rust\target`。内存 16 GB 时冷编建议 `-j 2`，高并行会导致 rustc 崩溃。
 
 ### 7.2 IPC 约定
 

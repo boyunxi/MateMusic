@@ -1,0 +1,4 @@
+# 使用 Rust 工具链自带的 rust-lld 作为 MSVC 链接器，缩短链接时间。
+# 该配置只影响本项目的 x86_64-pc-windows-msvc 目标。
+[target.x86_64-pc-windows-msvc]
+linker = "rust-lld.exe"
