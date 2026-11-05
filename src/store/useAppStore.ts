@@ -12,10 +12,12 @@ type AppState = {
   mode: PlayMode;
   setView: (view: View) => void;
   setMode: (mode: PlayMode) => void;
+  restore: (queue: LibraryTrack[], currentIndex: number, mode: PlayMode) => void;
   playTrack: (track: LibraryTrack, list?: LibraryTrack[]) => void;
   playIndex: (index: number) => void;
   enqueue: (track: LibraryTrack) => void;
   removeAt: (index: number) => void;
+  move: (from: number, to: number) => void;
   next: (auto?: boolean) => void;
   prev: () => void;
   clearQueue: () => void;
@@ -37,6 +39,7 @@ export const useAppStore = create<AppState>((set, get) => {
 
     setView: (view) => set({ view }),
     setMode: (mode) => set({ mode }),
+    restore: (queue, currentIndex, mode) => set({ queue, currentIndex, mode }),
 
     playTrack: (track, list) => {
       const state = get();
@@ -66,6 +69,20 @@ export const useAppStore = create<AppState>((set, get) => {
       let currentIndex = state.currentIndex;
       if (index < currentIndex) currentIndex -= 1;
       if (currentIndex >= queue.length) currentIndex = queue.length - 1;
+      set({ queue, currentIndex });
+    },
+
+    move: (from, to) => {
+      const state = get();
+      if (from === to || from < 0 || to < 0) return;
+      const queue = [...state.queue];
+      if (from >= queue.length || to >= queue.length) return;
+      const [item] = queue.splice(from, 1);
+      queue.splice(to, 0, item);
+      let currentIndex = state.currentIndex;
+      if (currentIndex === from) currentIndex = to;
+      else if (from < currentIndex && to >= currentIndex) currentIndex -= 1;
+      else if (from > currentIndex && to <= currentIndex) currentIndex += 1;
       set({ queue, currentIndex });
     },
 

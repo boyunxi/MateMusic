@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rusqlite::{params, Connection, Row};
+use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::Serialize;
 use tauri::{AppHandle, State};
 
@@ -129,6 +129,24 @@ pub struct LibraryStats {
     pub albums: i64,
     pub artists: i64,
     pub total_duration: f64,
+}
+
+#[derive(Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaybackStateRow {
+    pub queue_json: Option<String>,
+    pub current_index: i64,
+    pub mode: Option<String>,
+    pub position: f64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaylistRow {
+    pub id: i64,
+    pub name: String,
+    pub created_at: i64,
+    pub track_count: i64,
 }
 
 const TRACK_COLUMNS: &str = "id, path, title, artist, album, album_artist, track_no, disc_no, year, genre, duration, codec, sample_rate, bits, channels, bitrate, cover_path";
@@ -410,4 +428,179 @@ pub fn settings_set(
     )
     .map_err(|e| format!("写入设置失败: {e}"))?;
     Ok(())
+}
+
+#[tauri::command]
+pub fn playback_get_state(
+    state: State<'_, LibraryState>,
+) -> Result<Option<PlaybackStateRow>, String> {
+    let conn = state.conn()?;
+    conn.query_row(
+        "SELECT queue_json, current_index, mode, position FROM playback_state WHERE id = 1",
+        [],
+        |row| {
+            Ok(PlaybackStateRow {
+                queue_json: row.get(0)?,
+                current_index: row.get(1)?,
+                mode: row.get(2)?,
+                position: row.get::<_, Option<f64>>(3)?.unwrap_or(0.0),
+            })
+        },
+    )
+    .optional()
+    .map_err(|e| format!("读取播放状态失败: {e}"))
+}
+
+#[tauri::command]
+pub fn playback_save_state(
+    state: State<'_, LibraryState>,
+    queue_json: String,
+    current_index: i64,
+    mode: String,
+    position: f64,
+) -> Result<(), String> {
+    let conn = state.conn()?;
+    conn.execute(
+        "INSERT INTO playback_state(id, current_track_id, position, queue_json, mode, current_index, updated_at)
+         VALUES (1, NULL, ?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(id) DO UPDATE SET
+             position = excluded.position,
+             queue_json = excluded.queue_json,
+             mode = excluded.mode,
+             current_index = excluded.current_index,
+             updated_at = excluded.updated_at",
+        params![position, queue_json, mode, current_index, now_secs()],
+    )
+    .map_err(|e| format!("保存播放状态失败: {e}"))?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn playlist_list(state: State<'_, LibraryState>) -> Result<Vec<PlaylistRow>, String> {
+    let conn = state.conn()?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT p.id, p.name, p.created_at,
+                (SELECT COUNT(*) FROM playlist_tracks pt WHERE pt.playlist_id = p.id)
+             FROM playlists p ORDER BY p.created_at DESC, p.id DESC",
+        )
+        .map_err(|e| format!("查询歌单失败: {e}"))?;
+    let playlists = stmt
+        .query_map([], |row| {
+            Ok(PlaylistRow {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                created_at: row.get(2)?,
+                track_count: row.get(3)?,
+            })
+        })
+        .map_err(|e| format!("查询歌单失败: {e}"))?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e| format!("读取歌单失败: {e}"))?;
+    Ok(playlists)
+}
+
+#[tauri::command]
+pub fn playlist_create(state: State<'_, LibraryState>, name: String) -> Result<i64, String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("歌单名不能为空".to_string());
+    }
+    let conn = state.conn()?;
+    conn.execute(
+        "INSERT INTO playlists(name, created_at) VALUES (?1, ?2)",
+        params![name, now_secs()],
+    )
+    .map_err(|e| format!("创建歌单失败: {e}"))?;
+    Ok(conn.last_insert_rowid())
+}
+
+#[tauri::command]
+pub fn playlist_rename(
+    state: State<'_, LibraryState>,
+    id: i64,
+    name: String,
+) -> Result<(), String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("歌单名不能为空".to_string());
+    }
+    let conn = state.conn()?;
+    conn.execute(
+        "UPDATE playlists SET name = ?1 WHERE id = ?2",
+        params![name, id],
+    )
+    .map_err(|e| format!("重命名歌单失败: {e}"))?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn playlist_delete(state: State<'_, LibraryState>, id: i64) -> Result<(), String> {
+    let conn = state.conn()?;
+    conn.execute("DELETE FROM playlists WHERE id = ?1", params![id])
+        .map_err(|e| format!("删除歌单失败: {e}"))?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn playlist_add_track(
+    state: State<'_, LibraryState>,
+    playlist_id: i64,
+    track_id: i64,
+) -> Result<bool, String> {
+    let conn = state.conn()?;
+    let exists: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM playlist_tracks WHERE playlist_id = ?1 AND track_id = ?2",
+            params![playlist_id, track_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("检查歌单曲目失败: {e}"))?;
+    if exists > 0 {
+        return Ok(false);
+    }
+    conn.execute(
+        "INSERT INTO playlist_tracks(playlist_id, track_id, position)
+         SELECT ?1, ?2, COALESCE(MAX(position) + 1, 0) FROM playlist_tracks WHERE playlist_id = ?1",
+        params![playlist_id, track_id],
+    )
+    .map_err(|e| format!("加入歌单失败: {e}"))?;
+    Ok(true)
+}
+
+#[tauri::command]
+pub fn playlist_remove_track(
+    state: State<'_, LibraryState>,
+    playlist_id: i64,
+    track_id: i64,
+) -> Result<(), String> {
+    let conn = state.conn()?;
+    conn.execute(
+        "DELETE FROM playlist_tracks WHERE playlist_id = ?1 AND track_id = ?2",
+        params![playlist_id, track_id],
+    )
+    .map_err(|e| format!("移除歌单曲目失败: {e}"))?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn playlist_get_tracks(
+    state: State<'_, LibraryState>,
+    playlist_id: i64,
+) -> Result<Vec<TrackRow>, String> {
+    let conn = state.conn()?;
+    let sql = format!(
+        "SELECT t.id, t.path, t.title, t.artist, t.album, t.album_artist, t.track_no, t.disc_no, t.year, t.genre, t.duration, t.codec, t.sample_rate, t.bits, t.channels, t.bitrate, t.cover_path
+         FROM playlist_tracks pt JOIN tracks t ON t.id = pt.track_id
+         WHERE pt.playlist_id = ?1 ORDER BY pt.position"
+    );
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| format!("查询歌单曲目失败: {e}"))?;
+    let tracks = stmt
+        .query_map(params![playlist_id], map_track)
+        .map_err(|e| format!("查询歌单曲目失败: {e}"))?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e| format!("读取歌单曲目失败: {e}"))?;
+    Ok(tracks)
 }

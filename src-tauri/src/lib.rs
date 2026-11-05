@@ -119,7 +119,16 @@ pub fn run() {
             library::library_get_folders,
             library::library_stats,
             library::settings_get_all,
-            library::settings_set
+            library::settings_set,
+            library::playback_get_state,
+            library::playback_save_state,
+            library::playlist_list,
+            library::playlist_create,
+            library::playlist_rename,
+            library::playlist_delete,
+            library::playlist_add_track,
+            library::playlist_remove_track,
+            library::playlist_get_tracks
         ])
         .run(tauri::generate_context!())
         .expect("failed to run MateMusic");

@@ -61,6 +61,175 @@
   margin-top: 18px;
 }
 
+.playlist-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+  padding-bottom: 2px;
+  overflow-x: auto;
+}
+
+.playlist-bar::-webkit-scrollbar {
+  height: 4px;
+}
+
+.playlist-bar::-webkit-scrollbar-thumb {
+  border-radius: 99px;
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.playlist-chip {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border: 1px solid var(--hairline);
+  border-radius: 999px;
+  background: var(--tile);
+  color: var(--text-faint);
+  font: inherit;
+  font-size: 11.5px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.playlist-chip.is-active {
+  border-color: rgba(143, 227, 213, 0.35);
+  background: var(--accent-soft);
+  color: var(--text-strong);
+}
+
+.playlist-chip em {
+  color: var(--text-faint);
+  font-size: 10px;
+  font-style: normal;
+}
+
+.playlist-create {
+  border-style: dashed;
+  color: var(--accent);
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: grid;
+  place-items: center;
+  background: rgba(4, 7, 12, 0.5);
+  backdrop-filter: blur(6px);
+}
+
+.modal {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  width: min(480px, calc(100vw - 40px));
+  max-height: min(70vh, 560px);
+  padding: 22px;
+  border-radius: 20px;
+}
+
+.modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.modal-head h2 {
+  margin: 0;
+  color: var(--text-strong);
+  font-size: 16px;
+}
+
+.modal-close {
+  display: grid;
+  place-items: center;
+  padding: 4px;
+  border: 0;
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+}
+
+.modal-track {
+  margin: 0;
+  color: var(--text-faint);
+  font-size: 12px;
+}
+
+.modal-create {
+  display: flex;
+  gap: 8px;
+}
+
+.modal-create input {
+  flex: 1;
+  min-width: 0;
+  padding: 9px 12px;
+  border: 1px solid var(--hairline);
+  border-radius: 10px;
+  outline: none;
+  background: var(--tile);
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+}
+
+.modal-create button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  border: 1px solid var(--glass-border);
+  border-radius: 10px;
+  background: var(--tile-strong);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.modal-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  overflow-y: auto;
+}
+
+.modal-list button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: var(--tile);
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.modal-list button:hover {
+  background: var(--tile-strong);
+}
+
+.modal-list em {
+  margin-left: auto;
+  color: var(--text-faint);
+  font-size: 11px;
+  font-style: normal;
+}
+
+.modal-empty {
+  margin: 0;
+  padding: 12px 4px;
+  color: var(--text-faint);
+  font-size: 12px;
+}
+
 .search-box {
   display: flex;
   flex: 1;

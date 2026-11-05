@@ -52,6 +52,13 @@ export type ScanStatus = {
   current: string;
 };
 
+export type PlaylistRow = {
+  id: number;
+  name: string;
+  createdAt: number;
+  trackCount: number;
+};
+
 export type TrackQuery = {
   search?: string | null;
   sort?: string | null;
@@ -82,6 +89,20 @@ export const subscribeScan = (onStatus: (status: ScanStatus) => void) =>
 
 export const subscribeLibraryChanged = (onChange: () => void) =>
   listen("library://changed", () => onChange());
+
+export const getPlaylists = () => invoke<PlaylistRow[]>("playlist_list");
+export const createPlaylist = (name: string) =>
+  invoke<number>("playlist_create", { name });
+export const renamePlaylist = (id: number, name: string) =>
+  invoke<void>("playlist_rename", { id, name });
+export const deletePlaylist = (id: number) =>
+  invoke<void>("playlist_delete", { id });
+export const addTrackToPlaylist = (playlistId: number, trackId: number) =>
+  invoke<boolean>("playlist_add_track", { playlistId, trackId });
+export const removeTrackFromPlaylist = (playlistId: number, trackId: number) =>
+  invoke<void>("playlist_remove_track", { playlistId, trackId });
+export const getPlaylistTracks = (playlistId: number) =>
+  invoke<LibraryTrack[]>("playlist_get_tracks", { playlistId });
 
 export function coverUrl(path: string | null | undefined): string | null {
   if (!path || !inTauri) return null;

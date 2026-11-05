@@ -2,8 +2,23 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent, CSSProperties } from "react";
 import { motion, useReducedMotion } from "motion/react";
 import {
+  DndContext,
+  PointerSensor,
+  closestCenter,
+  useSensor,
+  useSensors,
+} from "@dnd-kit/core";
+import type { DragEndEvent } from "@dnd-kit/core";
+import {
+  SortableContext,
+  useSortable,
+  verticalListSortingStrategy,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
+import {
   Disc3,
   FolderOpen,
+  GripVertical,
   Heart,
   Library,
   ListMusic,
@@ -35,9 +50,21 @@ import {
 } from "../../lib/player";
 import type { PlayerSnapshot } from "../../lib/player";
 import { formatHz, formatTime, prettifyCodec } from "../../lib/format";
-import { coverArtClass, coverUrl, getSettings, setSetting } from "../../lib/library";
+import {
+  cancelScan,
+  coverArtClass,
+  coverUrl,
+  getScanStatus,
+  getSettings,
+  setSetting,
+  subscribeScan,
+} from "../../lib/library";
+import type { LibraryTrack, ScanStatus } from "../../lib/library";
+import { getPlaybackState, savePlaybackState } from "../../lib/playback";
+import ToastHost from "../../components/ToastHost";
 import LibraryView from "../library/LibraryView";
 import { useAppStore } from "../../store/useAppStore";
+import { useToastStore } from "../../store/useToastStore";
 import type { PlayMode, View } from "../../store/useAppStore";
 
 type Track = {
@@ -132,10 +159,73 @@ const NAV: { label: string; icon: typeof Library; view: View }[] = [
   { label: "设置", icon: Settings2, view: "settings" },
 ];
 
+function SortableQueueItem({
+  item,
+  active,
+  playing,
+  onPlay,
+}: {
+  item: LibraryTrack;
+  active: boolean;
+  playing: boolean;
+  onPlay: () => void;
+}) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
+    useSortable({ id: item.id });
+  const cover = coverUrl(item.coverPath);
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+  };
+
+  return (
+    <li ref={setNodeRef} style={style} className={`queue-row ${isDragging ? "is-dragging" : ""}`}>
+      <button
+        type="button"
+        className="queue-drag"
+        {...attributes}
+        {...listeners}
+        aria-label="拖拽排序"
+      >
+        <GripVertical size={14} />
+      </button>
+      <button
+        type="button"
+        className={`queue-item ${active ? "is-active" : ""}`}
+        onClick={onPlay}
+      >
+        <span className={`queue-art ${coverArtClass(item.id)}`}>
+          {cover && <img src={cover} alt="" loading="lazy" />}
+        </span>
+        <span className="queue-meta">
+          <strong>{item.title}</strong>
+          <em>{item.artist ?? "未知艺术家"}</em>
+        </span>
+        {active && playing ? (
+          <span className="equalizer" aria-hidden="true">
+            <i />
+            <i />
+            <i />
+          </span>
+        ) : (
+          <span className="queue-time">{formatTime(item.duration)}</span>
+        )}
+      </button>
+    </li>
+  );
+}
+
 export default function GlassDemo() {
   const reduced = useReducedMotion();
   const settingsLoaded = useRef(false);
   const finishedRef = useRef("");
+  const restoredRef = useRef(false);
+  const positionRef = useRef(0);
+  const scanToastId = useRef<number | null>(null);
+  const lastErrorRef = useRef("");
+  const shownNotesRef = useRef<Set<string>>(new Set());
+  const [restoreReady, setRestoreReady] = useState(!inTauri);
+  const [scan, setScan] = useState<ScanStatus | null>(null);
   const [theme, setTheme] = useState<"dark" | "light">(() =>
     new URLSearchParams(window.location.search).get("theme") === "light" ? "light" : "dark",
   );
@@ -159,6 +249,12 @@ export default function GlassDemo() {
   const playQueueIndex = useAppStore((state) => state.playIndex);
   const nextTrack = useAppStore((state) => state.next);
   const prevTrack = useAppStore((state) => state.prev);
+  const moveQueue = useAppStore((state) => state.move);
+  const pushToast = useToastStore((state) => state.push);
+  const updateToast = useToastStore((state) => state.update);
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
+  );
 
   const track = TRACKS[index];
   const loaded = snapshot?.loaded ? snapshot : null;
@@ -229,12 +325,11 @@ export default function GlassDemo() {
   useEffect(() => {
     if (!inTauri) {
       settingsLoaded.current = true;
+      setRestoreReady(true);
       return;
     }
-    let disposed = false;
     void getSettings()
       .then((settings) => {
-        if (disposed) return;
         if (settings.theme === "light" || settings.theme === "dark") setTheme(settings.theme);
         const storedBlur = Number(settings.glassBlur);
         if (Number.isFinite(storedBlur) && storedBlur >= 0 && storedBlur <= 48) setBlur(storedBlur);
@@ -250,10 +345,126 @@ export default function GlassDemo() {
       .catch(() => {
         settingsLoaded.current = true;
       });
+  }, []);
+
+  useEffect(() => {
+    if (!inTauri || restoredRef.current) return;
+    restoredRef.current = true;
+    void (async () => {
+      try {
+        const state = await getPlaybackState();
+        if (state?.queueJson) {
+          const parsed = JSON.parse(state.queueJson);
+          if (Array.isArray(parsed)) {
+            const restored: LibraryTrack[] = parsed.filter(
+              (item): item is LibraryTrack =>
+                !!item &&
+                typeof item.id === "number" &&
+                typeof item.path === "string" &&
+                typeof item.title === "string",
+            );
+            if (restored.length > 0) {
+              const modes: PlayMode[] = ["sequential", "repeat-all", "repeat-one", "shuffle"];
+              const mode = modes.includes(state.mode as PlayMode)
+                ? (state.mode as PlayMode)
+                : "sequential";
+              const index = Math.max(0, Math.min(state.currentIndex, restored.length - 1));
+              useAppStore.getState().restore(restored, index, mode);
+              const engine = await getPlayerState();
+              if (!engine.loaded) useAppStore.getState().setView("library");
+            }
+          }
+        }
+      } catch {
+        // 损坏的持久化状态不影响启动
+      } finally {
+        setRestoreReady(true);
+      }
+    })();
+  }, []);
+
+  useEffect(() => {
+    if (!inTauri || !restoreReady) return;
+    const timer = setTimeout(() => {
+      const state = useAppStore.getState();
+      void savePlaybackState(
+        JSON.stringify(state.queue),
+        state.currentIndex,
+        state.mode,
+        positionRef.current,
+      );
+    }, 400);
+    return () => clearTimeout(timer);
+  }, [queue, currentIndex, playMode, restoreReady]);
+
+  useEffect(() => {
+    if (!inTauri || !restoreReady) return;
+    const timer = setInterval(() => {
+      const state = useAppStore.getState();
+      if (state.queue.length > 0) {
+        void savePlaybackState(
+          JSON.stringify(state.queue),
+          state.currentIndex,
+          state.mode,
+          positionRef.current,
+        );
+      }
+    }, 5000);
+    return () => clearInterval(timer);
+  }, [restoreReady]);
+
+  useEffect(() => {
+    if (!inTauri) return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void getScanStatus()
+      .then((status) => {
+        if (!disposed) setScan(status);
+      })
+      .catch(() => {});
+    void subscribeScan((status) => setScan(status)).then((fn) => {
+      if (disposed) fn();
+      else unlisten = fn;
+    });
     return () => {
       disposed = true;
+      unlisten?.();
     };
   }, []);
+
+  useEffect(() => {
+    if (!inTauri || !scan) return;
+    if (scan.scanning) {
+      const message = `正在扫描：${scan.scanned} 已看 · ${scan.imported} 入库${
+        scan.errors > 0 ? ` · ${scan.errors} 错误` : ""
+      }`;
+      if (scanToastId.current == null) {
+        scanToastId.current = pushToast({
+          kind: "info",
+          message,
+          duration: 0,
+          actionLabel: "取消",
+          onAction: () => void cancelScan(),
+        });
+      } else {
+        updateToast(scanToastId.current, { message });
+      }
+    } else if (scanToastId.current != null) {
+      updateToast(scanToastId.current, {
+        kind: "success",
+        message: `扫描完成：入库 ${scan.imported} 首，跳过 ${scan.skipped} 首`,
+        duration: 4200,
+        actionLabel: undefined,
+        onAction: undefined,
+      });
+      scanToastId.current = null;
+    }
+  }, [scan, pushToast, updateToast]);
+
+  useEffect(() => {
+    if (!snapshot?.loaded) return;
+    positionRef.current = snapshot.position;
+  }, [snapshot?.loaded, snapshot?.position]);
 
   useEffect(() => {
     if (!inTauri || !settingsLoaded.current) return;
@@ -398,6 +609,31 @@ export default function GlassDemo() {
   const errorText = loaded?.error ?? bridgeError;
   const hasQueue = queue.length > 0;
 
+  useEffect(() => {
+    if (!errorText) {
+      lastErrorRef.current = "";
+      return;
+    }
+    if (lastErrorRef.current === errorText) return;
+    lastErrorRef.current = errorText;
+    pushToast({ kind: "error", message: errorText, duration: 6000 });
+  }, [errorText, pushToast]);
+
+  useEffect(() => {
+    const note = loaded?.note;
+    if (!note || shownNotesRef.current.has(note)) return;
+    shownNotesRef.current.add(note);
+    pushToast({ kind: "warning", message: note, duration: 6000 });
+  }, [loaded?.note, pushToast]);
+
+  const handleQueueDragEnd = (event: DragEndEvent) => {
+    const { active, over } = event;
+    if (!over || active.id === over.id) return;
+    const from = queue.findIndex((item) => item.id === active.id);
+    const to = queue.findIndex((item) => item.id === over.id);
+    if (from >= 0 && to >= 0) moveQueue(from, to);
+  };
+
   return (
     <div className="demo" data-theme={theme} style={{ "--glass-blur": `${blur}px` } as CSSProperties}>
       <div className="backdrop" aria-hidden="true">
@@ -526,9 +762,6 @@ export default function GlassDemo() {
                   </span>
                 </div>
               </header>
-
-              {errorText && <p className="error-line">{errorText}</p>}
-              {loaded?.note && <p className="note-line">{loaded.note}</p>}
 
               <section className="hero">
                 <motion.div
@@ -740,38 +973,28 @@ export default function GlassDemo() {
             </h2>
             <span>{hasQueue ? `${queue.length} 首` : loaded ? "1 首" : `${TRACKS.length} 首`}</span>
           </header>
-
           <ul className="queue-list">
             {hasQueue ? (
-              queue.map((item, i) => {
-                const cover = coverUrl(item.coverPath);
-                return (
-                  <li key={item.id}>
-                    <button
-                      type="button"
-                      className={`queue-item ${i === currentIndex ? "is-active" : ""}`}
-                      onClick={() => playQueueIndex(i)}
-                    >
-                      <span className={`queue-art ${coverArtClass(item.id)}`}>
-                        {cover && <img src={cover} alt="" loading="lazy" />}
-                      </span>
-                      <span className="queue-meta">
-                        <strong>{item.title}</strong>
-                        <em>{item.artist ?? "未知艺术家"}</em>
-                      </span>
-                      {i === currentIndex && loaded?.playing ? (
-                        <span className="equalizer" aria-hidden="true">
-                          <i />
-                          <i />
-                          <i />
-                        </span>
-                      ) : (
-                        <span className="queue-time">{formatTime(item.duration)}</span>
-                      )}
-                    </button>
-                  </li>
-                );
-              })
+              <DndContext
+                sensors={sensors}
+                collisionDetection={closestCenter}
+                onDragEnd={handleQueueDragEnd}
+              >
+                <SortableContext
+                  items={queue.map((item) => item.id)}
+                  strategy={verticalListSortingStrategy}
+                >
+                  {queue.map((item, i) => (
+                    <SortableQueueItem
+                      key={item.id}
+                      item={item}
+                      active={i === currentIndex}
+                      playing={loaded?.playing ?? false}
+                      onPlay={() => playQueueIndex(i)}
+                    />
+                  ))}
+                </SortableContext>
+              </DndContext>
             ) : loaded ? (
               <li>
                 <div className="queue-item is-active is-static">
@@ -839,6 +1062,7 @@ export default function GlassDemo() {
           </footer>
         </aside>
       </div>
+      <ToastHost />
     </div>
   );
 }

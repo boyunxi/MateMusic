@@ -78,10 +78,17 @@ pub fn open(path: &Path) -> rusqlite::Result<Connection> {
 }
 
 fn migrate(conn: &Connection) -> rusqlite::Result<()> {
-    let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    let mut version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     if version < 1 {
         conn.execute_batch(SCHEMA_V1)?;
         conn.execute_batch("PRAGMA user_version = 1;")?;
+        version = 1;
+    }
+    if version < 2 {
+        conn.execute_batch(
+            "ALTER TABLE playback_state ADD COLUMN current_index INTEGER NOT NULL DEFAULT -1;",
+        )?;
+        conn.execute_batch("PRAGMA user_version = 2;")?;
     }
     Ok(())
 }
