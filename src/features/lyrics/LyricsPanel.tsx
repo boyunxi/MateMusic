@@ -1,4 +1,5 @@
 import { useMemo } from "react";
+import type { CSSProperties } from "react";
 import type { LyricDoc, LyricLine, LyricWord } from "../../lib/lyrics";
 
 type Props = {
@@ -41,13 +42,20 @@ function Words({
   return (
     <>
       {line.words.map((word: LyricWord, index) => {
-        const sung = effectiveMs >= word.start * 1000;
-        const current =
-          effectiveMs >= word.start * 1000 && effectiveMs < word.end * 1000;
+        const startMs = word.start * 1000;
+        const endMs = word.end * 1000;
+        const sung = effectiveMs >= startMs;
+        const current = effectiveMs >= startMs && effectiveMs < endMs;
+        const progress = current
+          ? Math.min(Math.max((effectiveMs - startMs) / Math.max(endMs - startMs, 1), 0), 1)
+          : sung
+            ? 1
+            : 0;
         return (
           <span
             key={`${word.start}-${index}`}
             className={`lp-word ${sung ? "is-sung" : ""} ${current ? "is-current" : ""}`}
+            style={{ "--word-progress": `${progress * 100}%` } as CSSProperties}
           >
             {word.text}
           </span>

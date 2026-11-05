@@ -70,7 +70,7 @@
 }
 
 .lp-line.is-active .lp-word {
-  color: var(--text-faint);
+  color: var(--text);
 }
 
 .lp-line.is-active .lp-word.is-sung {
@@ -78,8 +78,16 @@
 }
 
 .lp-line.is-active .lp-word.is-current {
-  color: var(--accent);
-  text-shadow: 0 0 16px rgba(143, 227, 213, 0.3);
+  color: transparent;
+  background-image: linear-gradient(
+    90deg,
+    var(--accent) 0 var(--word-progress, 0%),
+    var(--text) var(--word-progress, 0%) 100%
+  );
+  background-clip: text;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  filter: drop-shadow(0 0 10px rgba(143, 227, 213, 0.22));
 }
 
 .lp-state {
