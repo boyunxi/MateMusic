@@ -1287,7 +1287,7 @@
 
 .layout.is-immersive {
   grid-template-columns: minmax(0, 1fr);
-  padding: 12px;
+  padding: 14px;
 }
 
 .layout.is-immersive .rail,
@@ -1296,39 +1296,84 @@
 }
 
 .layout.is-immersive .now {
-  padding: 24px clamp(28px, 6vw, 86px) 20px;
+  display: grid;
+  grid-template-columns: minmax(0, 0.92fr) minmax(0, 1.08fr);
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-areas:
+    "head head"
+    "cover lyrics"
+    "progress progress";
+  column-gap: clamp(30px, 5vw, 84px);
+  row-gap: 10px;
+  padding: 18px clamp(26px, 5vw, 68px);
+  overflow: hidden;
+}
+
+.layout.is-immersive .now-head {
+  grid-area: head;
+  justify-content: flex-end;
+  min-height: 38px;
+}
+
+.layout.is-immersive .now-head .eyebrow,
+.layout.is-immersive .now-head .output-chip {
+  display: none;
+}
+
+.immersive-exit {
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  padding: 0;
+  border: 1px solid var(--glass-border);
+  border-radius: 50%;
+  background: var(--tile);
+  color: var(--text);
+  cursor: pointer;
+  transition:
+    background 180ms var(--ease-out),
+    color 180ms var(--ease-out);
+}
+
+.immersive-exit:hover {
+  background: var(--tile-strong);
+  color: var(--text-strong);
 }
 
 .layout.is-immersive .hero {
+  grid-area: cover;
+  gap: 0;
+  margin: 0;
+  min-height: 0;
   justify-content: center;
-  gap: clamp(30px, 4.4vw, 64px);
-  margin-top: 12px;
+}
+
+.layout.is-immersive .hero .meta {
+  display: none;
 }
 
 .layout.is-immersive .cover {
-  width: min(340px, 38vh);
-}
-
-.layout.is-immersive .meta {
-  max-width: 620px;
-}
-
-.layout.is-immersive .meta h1 {
-  font-size: clamp(32px, 3.6vw, 48px);
+  width: min(100%, 56vh);
+  max-width: 560px;
 }
 
 .layout.is-immersive .lyrics {
   display: flex;
-  flex: 1;
+  grid-area: lyrics;
   min-height: 0;
-  margin-top: 6px;
-  padding-top: 0;
+  margin: 0;
+  padding: 0;
 }
 
 .layout.is-immersive .lyrics .lp {
   width: 100%;
   flex: 1;
   min-height: 0;
+}
+
+.layout.is-immersive .lp-toolbar {
+  display: none;
 }
 
 .layout.is-immersive .lp-text {
@@ -1344,16 +1389,52 @@
 }
 
 .layout.is-immersive .transport {
-  padding-top: 6px;
+  grid-area: progress;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
 }
 
-@media (max-height: 700px) {
-  .layout.is-immersive .cover {
-    width: min(240px, 32vh);
+.layout.is-immersive .transport-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.layout.is-immersive .lp-track {
+  min-height: 100%;
+  justify-content: center;
+}
+
+.layout.is-immersive .transport-side,
+.layout.is-immersive .volume,
+.layout.is-immersive .transport-main > .icon-button {
+  display: none;
+}
+
+.layout.is-immersive .transport-main {
+  gap: 0;
+}
+
+.layout.is-immersive .play-button {
+  width: 44px;
+  height: 44px;
+}
+
+@media (max-width: 860px) {
+  .layout.is-immersive .now {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto auto minmax(0, 1fr) auto;
+    grid-template-areas:
+      "head"
+      "cover"
+      "lyrics"
+      "progress";
+    row-gap: 8px;
   }
 
-  .layout.is-immersive .meta h1 {
-    font-size: clamp(26px, 3vw, 34px);
+  .layout.is-immersive .cover {
+    width: min(46vw, 220px);
   }
 }
 

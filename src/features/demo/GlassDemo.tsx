@@ -973,12 +973,13 @@ export default function GlassDemo() {
                   )}
                   {immersive && (
                     <button
-                      className="open-file"
+                      className="immersive-exit"
                       type="button"
                       onClick={() => setImmersive(false)}
+                      aria-label="退出沉浸模式"
+                      title="退出沉浸（Esc）"
                     >
-                      <Minimize2 size={15} />
-                      退出沉浸
+                      <Minimize2 size={18} />
                     </button>
                   )}
                   <span className="output-chip">
