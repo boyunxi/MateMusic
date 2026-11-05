@@ -724,6 +724,11 @@
   color: #ff9db1;
 }
 
+.icon-button.is-active-mode {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
 .icon-button:disabled {
   opacity: 0.3;
   cursor: default;

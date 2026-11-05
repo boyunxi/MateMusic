@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent, CSSProperties } from "react";
 import { motion, useReducedMotion } from "motion/react";
 import {
@@ -34,6 +34,11 @@ import {
   subscribePlayer,
 } from "../../lib/player";
 import type { PlayerSnapshot } from "../../lib/player";
+import { formatHz, formatTime, prettifyCodec } from "../../lib/format";
+import { coverArtClass, coverUrl, getSettings, setSetting } from "../../lib/library";
+import LibraryView from "../library/LibraryView";
+import { useAppStore } from "../../store/useAppStore";
+import type { PlayMode, View } from "../../store/useAppStore";
 
 type Track = {
   id: string;
@@ -108,41 +113,29 @@ const LYRICS = [
 
 const LINE_HEIGHT = 38;
 
-const CODEC_NAMES: Record<string, string> = {
-  pcm_s16le: "PCM 16",
-  pcm_s24le: "PCM 24",
-  pcm_s32le: "PCM 32",
-  pcm_f32le: "PCM F32",
+const MODE_LABELS: Record<PlayMode, string> = {
+  sequential: "顺序播放",
+  "repeat-all": "列表循环",
+  "repeat-one": "单曲循环",
+  shuffle: "随机播放",
 };
-
-function formatTime(seconds: number) {
-  const s = Math.max(0, Math.floor(seconds));
-  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
-}
-
-function formatHz(rate: number) {
-  if (!rate) return "未知";
-  return rate % 1000 === 0 ? `${rate / 1000} kHz` : `${(rate / 1000).toFixed(1)} kHz`;
-}
-
-function prettifyCodec(codec: string) {
-  return CODEC_NAMES[codec] ?? codec.toUpperCase();
-}
 
 function folderOf(path: string) {
   const parts = path.split(/[\\/]/);
   return parts.length > 1 ? parts[parts.length - 2] : "";
 }
 
-const NAV = [
-  { label: "曲库", icon: Library },
-  { label: "正在播放", icon: Disc3 },
-  { label: "歌词", icon: Mic2 },
-  { label: "设置", icon: Settings2 },
+const NAV: { label: string; icon: typeof Library; view: View }[] = [
+  { label: "曲库", icon: Library, view: "library" },
+  { label: "正在播放", icon: Disc3, view: "now" },
+  { label: "歌词", icon: Mic2, view: "lyrics" },
+  { label: "设置", icon: Settings2, view: "settings" },
 ];
 
 export default function GlassDemo() {
   const reduced = useReducedMotion();
+  const settingsLoaded = useRef(false);
+  const finishedRef = useRef("");
   const [theme, setTheme] = useState<"dark" | "light">(() =>
     new URLSearchParams(window.location.search).get("theme") === "light" ? "light" : "dark",
   );
@@ -157,6 +150,16 @@ export default function GlassDemo() {
   const [bridgeError, setBridgeError] = useState<string | null>(null);
   const [outputPreference, setOutputPreference] = useState<"exclusive" | "shared">("exclusive");
 
+  const view = useAppStore((state) => state.view);
+  const setView = useAppStore((state) => state.setView);
+  const queue = useAppStore((state) => state.queue);
+  const currentIndex = useAppStore((state) => state.currentIndex);
+  const playMode = useAppStore((state) => state.mode);
+  const setPlayMode = useAppStore((state) => state.setMode);
+  const playQueueIndex = useAppStore((state) => state.playIndex);
+  const nextTrack = useAppStore((state) => state.next);
+  const prevTrack = useAppStore((state) => state.prev);
+
   const track = TRACKS[index];
   const loaded = snapshot?.loaded ? snapshot : null;
   const real = loaded !== null;
@@ -164,18 +167,33 @@ export default function GlassDemo() {
   const duration = loaded ? loaded.duration : track.duration;
   const progress = duration > 0 ? Math.min(time / duration, 1) : 0;
 
-  const displayTitle = loaded ? loaded.title : track.title;
-  const displayArtist = loaded ? "本地文件" : track.artist;
-  const displayAlbum = loaded ? folderOf(loaded.path) || "本地曲目" : `${track.album} · ${track.year}`;
+  const currentQueueTrack = currentIndex >= 0 ? queue[currentIndex] ?? null : null;
+  const queueTrack =
+    loaded && currentQueueTrack && currentQueueTrack.path === loaded.path
+      ? currentQueueTrack
+      : null;
+
+  const displayCodec = queueTrack?.codec ?? loaded?.codec;
+  const displayBits = queueTrack?.bits ?? loaded?.bits;
+  const displayRate = queueTrack?.sampleRate ?? loaded?.sampleRate;
+  const displayTitle = queueTrack?.title ?? (loaded ? loaded.title : track.title);
+  const displayArtist = queueTrack?.artist ?? (loaded ? "本地文件" : track.artist);
+  const displayAlbum =
+    queueTrack?.album ?? (loaded ? folderOf(loaded.path) || "本地曲目" : `${track.album} · ${track.year}`);
   const badges = loaded
     ? [
-        prettifyCodec(loaded.codec),
-        loaded.bits ? `${loaded.bits} bit` : "位深未知",
-        formatHz(loaded.sampleRate),
+        displayCodec ? prettifyCodec(displayCodec) : "未知",
+        displayBits ? `${displayBits} bit` : "位深未知",
+        formatHz(displayRate ?? 0),
       ]
     : ["FLAC", "24 bit", "96 kHz"];
-  const artClass = loaded ? "art-aurora" : `art-${track.art}`;
-  const coverKey = loaded ? loaded.path : track.art;
+  const artClass = queueTrack
+    ? coverArtClass(queueTrack.id)
+    : loaded
+      ? "art-aurora"
+      : `art-${track.art}`;
+  const heroCover = coverUrl(queueTrack?.coverPath ?? null);
+  const coverKey = queueTrack ? `lib-${queueTrack.id}` : loaded ? loaded.path : track.art;
 
   const applySnapshot = useCallback((state: PlayerSnapshot) => {
     setSnapshot(state);
@@ -207,6 +225,55 @@ export default function GlassDemo() {
       unlisten?.();
     };
   }, [applySnapshot]);
+
+  useEffect(() => {
+    if (!inTauri) {
+      settingsLoaded.current = true;
+      return;
+    }
+    let disposed = false;
+    void getSettings()
+      .then((settings) => {
+        if (disposed) return;
+        if (settings.theme === "light" || settings.theme === "dark") setTheme(settings.theme);
+        const storedBlur = Number(settings.glassBlur);
+        if (Number.isFinite(storedBlur) && storedBlur >= 0 && storedBlur <= 48) setBlur(storedBlur);
+        const storedVolume = Number(settings.volume);
+        if (Number.isFinite(storedVolume) && storedVolume >= 0 && storedVolume <= 1) {
+          setVolume(storedVolume);
+        }
+        if (settings.outputMode === "exclusive" || settings.outputMode === "shared") {
+          setOutputPreference(settings.outputMode);
+        }
+        settingsLoaded.current = true;
+      })
+      .catch(() => {
+        settingsLoaded.current = true;
+      });
+    return () => {
+      disposed = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!inTauri || !settingsLoaded.current) return;
+    void setSetting("theme", theme);
+  }, [theme]);
+
+  useEffect(() => {
+    if (!inTauri || !settingsLoaded.current) return;
+    void setSetting("glassBlur", String(blur));
+  }, [blur]);
+
+  useEffect(() => {
+    if (!inTauri || !settingsLoaded.current) return;
+    void setSetting("volume", String(volume));
+  }, [volume]);
+
+  useEffect(() => {
+    if (!inTauri || !settingsLoaded.current) return;
+    void setSetting("outputMode", outputPreference);
+  }, [outputPreference]);
 
   // 演示模式的模拟时钟
   useEffect(() => {
@@ -243,6 +310,22 @@ export default function GlassDemo() {
     setIndex((i) => (i + 1) % TRACKS.length);
     setTime(0);
   }, [real, time, track.duration]);
+
+  useEffect(() => {
+    if (!snapshot?.finished) finishedRef.current = "";
+  }, [snapshot?.finished]);
+
+  useEffect(() => {
+    if (!loaded || !snapshot?.finished) return;
+    const key = `${snapshot.path}:${snapshot.duration}`;
+    if (finishedRef.current === key) return;
+    finishedRef.current = key;
+    nextTrack(true);
+  }, [loaded, snapshot?.finished, snapshot?.path, snapshot?.duration, nextTrack]);
+
+  useEffect(() => {
+    if (loaded) void setTrackVolume(volume);
+  }, [loaded?.path]);
 
   const activeIndex = useMemo(() => {
     let active = 0;
@@ -301,7 +384,19 @@ export default function GlassDemo() {
     }
   };
 
+  const cycleMode = () => {
+    const order: PlayMode[] = ["sequential", "repeat-all", "repeat-one", "shuffle"];
+    setPlayMode(order[(order.indexOf(playMode) + 1) % order.length]);
+  };
+
+  const toggleShuffle = () => setPlayMode(playMode === "shuffle" ? "sequential" : "shuffle");
+  const cycleRepeat = () =>
+    setPlayMode(
+      playMode === "repeat-all" ? "repeat-one" : playMode === "repeat-one" ? "sequential" : "repeat-all",
+    );
+
   const errorText = loaded?.error ?? bridgeError;
+  const hasQueue = queue.length > 0;
 
   return (
     <div className="demo" data-theme={theme} style={{ "--glass-blur": `${blur}px` } as CSSProperties}>
@@ -320,8 +415,13 @@ export default function GlassDemo() {
           </div>
 
           <nav className="nav">
-            {NAV.map(({ label, icon: Icon }, i) => (
-              <button key={label} className={`nav-item ${i === 1 ? "is-active" : ""}`} type="button">
+            {NAV.map(({ label, icon: Icon, view: target }) => (
+              <button
+                key={label}
+                className={`nav-item ${view === target ? "is-active" : ""}`}
+                type="button"
+                onClick={() => setView(target)}
+              >
                 <Icon size={18} strokeWidth={1.8} />
                 <span>{label}</span>
               </button>
@@ -391,208 +491,246 @@ export default function GlassDemo() {
         </aside>
 
         <main className="now glass">
-          <header className="now-head">
-            <p className="eyebrow">正在播放</p>
-            <div className="head-actions">
-              {inTauri && (
-                <button className="open-file" type="button" onClick={handleOpen} disabled={opening}>
-                  <FolderOpen size={15} />
-                  {opening ? "读取中…" : real ? "更换音频" : "打开音频"}
-                </button>
-              )}
-              <span className="output-chip">
-                <i className="pulse" />
-                {loaded
-                  ? `${loaded.outputMode} · ${formatHz(loaded.outputRate)}`
-                  : "演示模式 · 未接入音频"}
-              </span>
-            </div>
-          </header>
-
-          {errorText && <p className="error-line">{errorText}</p>}
-          {loaded?.note && <p className="note-line">{loaded.note}</p>}
-
-          <section className="hero">
-            <motion.div
-              key={coverKey}
-              className={`cover ${artClass}`}
-              initial={reduced ? false : { opacity: 0, scale: 0.97 }}
-              animate={{ opacity: 1, scale: 1 }}
-              transition={{ duration: 0.5, ease: [0.22, 1, 0.36, 1] }}
-            >
-              <span className="cover-ring" />
-              <span className="cover-sheen" />
-            </motion.div>
-
-            <div className="meta">
-              <motion.div
-                key={coverKey}
-                initial={reduced ? false : { opacity: 0, y: 10 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ duration: 0.3, ease: [0.22, 1, 0.36, 1] }}
-              >
-                <h1>{displayTitle}</h1>
-                <p className="artist">{displayArtist}</p>
-                <p className="album">{displayAlbum}</p>
-                <div className="badges">
-                  {badges.map((badge, i) => (
-                    <span key={`${badge}-${i}`}>{badge}</span>
-                  ))}
-                </div>
-              </motion.div>
-
-              <div className="meta-actions">
-                <button
-                  type="button"
-                  className={`icon-button ${liked ? "is-liked" : ""}`}
-                  onClick={() => setLiked((v) => !v)}
-                  aria-label={liked ? "取消收藏" : "收藏"}
-                  aria-pressed={liked}
-                >
-                  <Heart size={18} fill={liked ? "currentColor" : "none"} />
-                </button>
-                <button type="button" className="icon-button" aria-label="沉浸模式">
-                  <Maximize2 size={18} />
-                </button>
-              </div>
-            </div>
-          </section>
-
-          <section className="audio-info" aria-label="音频参数">
-            <div>
-              <span>源文件</span>
-              <strong>
-                {loaded
-                  ? `${prettifyCodec(loaded.codec)} · ${loaded.bits ?? "?"} bit · ${formatHz(loaded.sampleRate)}`
-                  : "FLAC · 24 bit · 96 kHz"}
-              </strong>
-            </div>
-            <div>
-              <span>解码</span>
-              <strong>PCM · 32 bit float</strong>
-            </div>
-            <div>
-              <span>输出</span>
-              <strong title={loaded ? `${loaded.outputMode} · ${formatHz(loaded.outputRate)} · ${loaded.outputFormat}` : undefined}>
-                {loaded
-                  ? `${loaded.outputMode} · ${formatHz(loaded.outputRate)} · ${loaded.outputFormat}`
-                  : "WASAPI 独占 · 96 kHz"}
-              </strong>
-            </div>
-          </section>
-
-          <section className="lyrics" aria-label="歌词">
-            {loaded ? (
-              <div className="lyric-placeholder">
-                <p>正在播放本地文件</p>
-                <p>歌词解析将在 M3 接入，当前不展示模拟歌词</p>
-              </div>
-            ) : (
-              <div className="lyric-viewport">
-                <div
-                  className="lyric-track"
-                  style={{ transform: `translateY(${-lyricOffset * LINE_HEIGHT}px)` }}
-                >
-                  {LYRICS.map((line, i) => (
-                    <button
-                      key={line.t}
-                      type="button"
-                      className={`lyric-line ${i === activeIndex ? "is-active" : ""}`}
-                      onClick={() => setTime(line.t)}
-                    >
-                      {line.text}
+          {view === "library" ? (
+            <LibraryView />
+          ) : view === "lyrics" ? (
+            <section className="placeholder-view">
+              <p className="eyebrow">歌词</p>
+              <h1>歌词页</h1>
+              <p>歌词解析、双语与逐字高亮将在 M3 接入。当前真实播放不展示模拟歌词。</p>
+            </section>
+          ) : view === "settings" ? (
+            <section className="placeholder-view">
+              <p className="eyebrow">设置</p>
+              <h1>设置</h1>
+              <p>
+                主题、玻璃模糊、音量与输出模式会持久化；输出设备、曲库目录管理与快捷键将在后续接入。
+              </p>
+            </section>
+          ) : (
+            <>
+              <header className="now-head">
+                <p className="eyebrow">正在播放</p>
+                <div className="head-actions">
+                  {inTauri && (
+                    <button className="open-file" type="button" onClick={handleOpen} disabled={opening}>
+                      <FolderOpen size={15} />
+                      {opening ? "读取中…" : real ? "更换音频" : "打开音频"}
                     </button>
-                  ))}
-                </div>
-              </div>
-            )}
-          </section>
-
-          <section className="transport">
-            <input
-              className="range progress"
-              type="range"
-              min={0}
-              max={duration || 1}
-              step={0.1}
-              value={Math.min(time, duration || 1)}
-              onChange={seek}
-              onPointerUp={commitSeek}
-              onKeyUp={commitSeek}
-              style={{ "--pct": `${progress * 100}%` } as CSSProperties}
-              aria-label="播放进度"
-            />
-            <div className="times">
-              <span>{formatTime(time)}</span>
-              <span>-{formatTime(Math.ceil(Math.max(duration - time, 0)))}</span>
-            </div>
-
-            <div className="transport-row">
-              <div className="transport-side">
-                <button type="button" className="icon-button" aria-label="随机播放" disabled={real}>
-                  <Shuffle size={17} />
-                </button>
-                <button type="button" className="icon-button" aria-label="循环" disabled={real}>
-                  <Repeat size={17} />
-                </button>
-              </div>
-
-              <div className="transport-main">
-                <button
-                  type="button"
-                  className="icon-button"
-                  onClick={() => selectTrack((index - 1 + TRACKS.length) % TRACKS.length)}
-                  disabled={real}
-                  aria-label="上一首"
-                >
-                  <SkipBack size={20} fill="currentColor" />
-                </button>
-                <button
-                  type="button"
-                  className="play-button"
-                  onClick={togglePlay}
-                  aria-label={isPlaying ? "暂停" : "播放"}
-                >
-                  {isPlaying ? (
-                    <Pause size={22} fill="currentColor" />
-                  ) : (
-                    <Play size={22} fill="currentColor" />
                   )}
-                </button>
-                <button
-                  type="button"
-                  className="icon-button"
-                  onClick={() => selectTrack((index + 1) % TRACKS.length)}
-                  disabled={real}
-                  aria-label="下一首"
-                >
-                  <SkipForward size={20} fill="currentColor" />
-                </button>
-              </div>
+                  <span className="output-chip">
+                    <i className="pulse" />
+                    {loaded
+                      ? `${loaded.outputMode} · ${formatHz(loaded.outputRate)}`
+                      : "演示模式 · 未接入音频"}
+                  </span>
+                </div>
+              </header>
 
-              <div className="volume">
-                <button
-                  type="button"
-                  className="icon-button"
-                  onClick={() => changeVolume(volume > 0 ? 0 : 0.72)}
-                  aria-label={volume > 0 ? "静音" : "取消静音"}
+              {errorText && <p className="error-line">{errorText}</p>}
+              {loaded?.note && <p className="note-line">{loaded.note}</p>}
+
+              <section className="hero">
+                <motion.div
+                  key={coverKey}
+                  className={`cover ${artClass} ${heroCover ? "has-image" : ""}`}
+                  initial={reduced ? false : { opacity: 0, scale: 0.97 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  transition={{ duration: 0.5, ease: [0.22, 1, 0.36, 1] }}
                 >
-                  {volume > 0 ? <Volume2 size={17} /> : <VolumeX size={17} />}
-                </button>
+                  {heroCover && <img className="cover-image" src={heroCover} alt="" />}
+                  <span className="cover-ring" />
+                  <span className="cover-sheen" />
+                </motion.div>
+
+                <div className="meta">
+                  <motion.div
+                    key={coverKey}
+                    initial={reduced ? false : { opacity: 0, y: 10 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ duration: 0.3, ease: [0.22, 1, 0.36, 1] }}
+                  >
+                    <h1>{displayTitle}</h1>
+                    <p className="artist">{displayArtist}</p>
+                    <p className="album">{displayAlbum}</p>
+                    <div className="badges">
+                      {badges.map((badge, i) => (
+                        <span key={`${badge}-${i}`}>{badge}</span>
+                      ))}
+                    </div>
+                  </motion.div>
+
+                  <div className="meta-actions">
+                    <button
+                      type="button"
+                      className={`icon-button ${liked ? "is-liked" : ""}`}
+                      onClick={() => setLiked((v) => !v)}
+                      aria-label={liked ? "取消收藏" : "收藏"}
+                      aria-pressed={liked}
+                    >
+                      <Heart size={18} fill={liked ? "currentColor" : "none"} />
+                    </button>
+                    <button type="button" className="icon-button" aria-label="沉浸模式">
+                      <Maximize2 size={18} />
+                    </button>
+                  </div>
+                </div>
+              </section>
+
+              <section className="audio-info" aria-label="音频参数">
+                <div>
+                  <span>源文件</span>
+                  <strong>
+                    {loaded
+                      ? `${displayCodec ? prettifyCodec(displayCodec) : "未知"} · ${displayBits ?? "?"} bit · ${formatHz(displayRate ?? 0)}`
+                      : "FLAC · 24 bit · 96 kHz"}
+                  </strong>
+                </div>
+                <div>
+                  <span>解码</span>
+                  <strong>PCM · 32 bit float</strong>
+                </div>
+                <div>
+                  <span>输出</span>
+                  <strong
+                    title={
+                      loaded
+                        ? `${loaded.outputMode} · ${formatHz(loaded.outputRate)} · ${loaded.outputFormat}`
+                        : undefined
+                    }
+                  >
+                    {loaded
+                      ? `${loaded.outputMode} · ${formatHz(loaded.outputRate)} · ${loaded.outputFormat}`
+                      : "WASAPI 独占 · 96 kHz"}
+                  </strong>
+                </div>
+              </section>
+
+              <section className="lyrics" aria-label="歌词">
+                {loaded ? (
+                  <div className="lyric-placeholder">
+                    <p>正在播放本地文件</p>
+                    <p>歌词解析将在 M3 接入，当前不展示模拟歌词</p>
+                  </div>
+                ) : (
+                  <div className="lyric-viewport">
+                    <div
+                      className="lyric-track"
+                      style={{ transform: `translateY(${-lyricOffset * LINE_HEIGHT}px)` }}
+                    >
+                      {LYRICS.map((line, i) => (
+                        <button
+                          key={line.t}
+                          type="button"
+                          className={`lyric-line ${i === activeIndex ? "is-active" : ""}`}
+                          onClick={() => setTime(line.t)}
+                        >
+                          {line.text}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </section>
+
+              <section className="transport">
                 <input
-                  className="range is-volume"
+                  className="range progress"
                   type="range"
                   min={0}
-                  max={1}
-                  step={0.01}
-                  value={volume}
-                  onChange={(e) => changeVolume(Number(e.target.value))}
-                  style={{ "--pct": `${volume * 100}%` } as CSSProperties}
-                  aria-label="音量"
+                  max={duration || 1}
+                  step={0.1}
+                  value={Math.min(time, duration || 1)}
+                  onChange={seek}
+                  onPointerUp={commitSeek}
+                  onKeyUp={commitSeek}
+                  style={{ "--pct": `${progress * 100}%` } as CSSProperties}
+                  aria-label="播放进度"
                 />
-              </div>
-            </div>
-          </section>
+                <div className="times">
+                  <span>{formatTime(time)}</span>
+                  <span>-{formatTime(Math.ceil(Math.max(duration - time, 0)))}</span>
+                </div>
+
+                <div className="transport-row">
+                  <div className="transport-side">
+                    <button
+                      type="button"
+                      className={`icon-button ${playMode === "shuffle" ? "is-active-mode" : ""}`}
+                      onClick={toggleShuffle}
+                      aria-label="随机播放"
+                      aria-pressed={playMode === "shuffle"}
+                    >
+                      <Shuffle size={17} />
+                    </button>
+                    <button
+                      type="button"
+                      className={`icon-button ${playMode.startsWith("repeat") ? "is-active-mode" : ""}`}
+                      onClick={cycleRepeat}
+                      aria-label="循环模式"
+                    >
+                      <Repeat size={17} />
+                    </button>
+                  </div>
+
+                  <div className="transport-main">
+                    <button
+                      type="button"
+                      className="icon-button"
+                      onClick={() => (hasQueue ? prevTrack() : selectTrack((index - 1 + TRACKS.length) % TRACKS.length))}
+                      disabled={!hasQueue && real}
+                      aria-label="上一首"
+                    >
+                      <SkipBack size={20} fill="currentColor" />
+                    </button>
+                    <button
+                      type="button"
+                      className="play-button"
+                      onClick={togglePlay}
+                      aria-label={isPlaying ? "暂停" : "播放"}
+                    >
+                      {isPlaying ? (
+                        <Pause size={22} fill="currentColor" />
+                      ) : (
+                        <Play size={22} fill="currentColor" />
+                      )}
+                    </button>
+                    <button
+                      type="button"
+                      className="icon-button"
+                      onClick={() => (hasQueue ? nextTrack() : selectTrack((index + 1) % TRACKS.length))}
+                      disabled={!hasQueue && real}
+                      aria-label="下一首"
+                    >
+                      <SkipForward size={20} fill="currentColor" />
+                    </button>
+                  </div>
+
+                  <div className="volume">
+                    <button
+                      type="button"
+                      className="icon-button"
+                      onClick={() => changeVolume(volume > 0 ? 0 : 0.72)}
+                      aria-label={volume > 0 ? "静音" : "取消静音"}
+                    >
+                      {volume > 0 ? <Volume2 size={17} /> : <VolumeX size={17} />}
+                    </button>
+                    <input
+                      className="range is-volume"
+                      type="range"
+                      min={0}
+                      max={1}
+                      step={0.01}
+                      value={volume}
+                      onChange={(e) => changeVolume(Number(e.target.value))}
+                      style={{ "--pct": `${volume * 100}%` } as CSSProperties}
+                      aria-label="音量"
+                    />
+                  </div>
+                </div>
+              </section>
+            </>
+          )}
         </main>
 
         <aside className="queue glass">
@@ -600,11 +738,41 @@ export default function GlassDemo() {
             <h2>
               <ListMusic size={16} /> 播放队列
             </h2>
-            <span>{loaded ? "1 首" : `${TRACKS.length} 首`}</span>
+            <span>{hasQueue ? `${queue.length} 首` : loaded ? "1 首" : `${TRACKS.length} 首`}</span>
           </header>
 
           <ul className="queue-list">
-            {loaded ? (
+            {hasQueue ? (
+              queue.map((item, i) => {
+                const cover = coverUrl(item.coverPath);
+                return (
+                  <li key={item.id}>
+                    <button
+                      type="button"
+                      className={`queue-item ${i === currentIndex ? "is-active" : ""}`}
+                      onClick={() => playQueueIndex(i)}
+                    >
+                      <span className={`queue-art ${coverArtClass(item.id)}`}>
+                        {cover && <img src={cover} alt="" loading="lazy" />}
+                      </span>
+                      <span className="queue-meta">
+                        <strong>{item.title}</strong>
+                        <em>{item.artist ?? "未知艺术家"}</em>
+                      </span>
+                      {i === currentIndex && loaded?.playing ? (
+                        <span className="equalizer" aria-hidden="true">
+                          <i />
+                          <i />
+                          <i />
+                        </span>
+                      ) : (
+                        <span className="queue-time">{formatTime(item.duration)}</span>
+                      )}
+                    </button>
+                  </li>
+                );
+              })
+            ) : loaded ? (
               <li>
                 <div className="queue-item is-active is-static">
                   <span className={`queue-art ${artClass}`} />
@@ -622,6 +790,12 @@ export default function GlassDemo() {
                     <span className="queue-time">{formatTime(loaded.duration)}</span>
                   )}
                 </div>
+              </li>
+            ) : inTauri ? (
+              <li className="queue-empty">
+                队列为空
+                <br />
+                <span>从曲库双击播放，或点 + 加入队列</span>
               </li>
             ) : (
               TRACKS.map((item, i) => (
@@ -652,7 +826,16 @@ export default function GlassDemo() {
           </ul>
 
           <footer className="queue-foot">
-            {loaded ? "曲库与队列将在 M2 接入" : "拖拽排序将在正式版接入"}
+            {hasQueue ? (
+              <>
+                <button className="queue-mode" type="button" onClick={cycleMode}>
+                  {MODE_LABELS[playMode]}
+                </button>
+                <span>{playMode === "shuffle" ? "随机续播" : "按序续播"}</span>
+              </>
+            ) : (
+              <span>{loaded ? "可直接播放当前文件" : "拖拽排序将在后续接入"}</span>
+            )}
           </footer>
         </aside>
       </div>

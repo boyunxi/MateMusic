@@ -19,6 +19,7 @@ export type PlayerSnapshot = {
   outputFormat: string;
   device: string;
   underruns: number;
+  finished: boolean;
   error: string | null;
   note: string | null;
 };

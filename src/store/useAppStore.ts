@@ -1,0 +1,106 @@
+import { create } from "zustand";
+import { loadTrack, pauseTrack } from "../lib/player";
+import type { LibraryTrack } from "../lib/library";
+
+export type View = "library" | "now" | "lyrics" | "settings";
+export type PlayMode = "sequential" | "repeat-all" | "repeat-one" | "shuffle";
+
+type AppState = {
+  view: View;
+  queue: LibraryTrack[];
+  currentIndex: number;
+  mode: PlayMode;
+  setView: (view: View) => void;
+  setMode: (mode: PlayMode) => void;
+  playTrack: (track: LibraryTrack, list?: LibraryTrack[]) => void;
+  playIndex: (index: number) => void;
+  enqueue: (track: LibraryTrack) => void;
+  removeAt: (index: number) => void;
+  next: (auto?: boolean) => void;
+  prev: () => void;
+  clearQueue: () => void;
+};
+
+export const useAppStore = create<AppState>((set, get) => {
+  const playAt = (queue: LibraryTrack[], index: number) => {
+    const track = queue[index];
+    if (!track) return;
+    set({ queue, currentIndex: index, view: "now" });
+    void loadTrack(track.path);
+  };
+
+  return {
+    view: "now",
+    queue: [],
+    currentIndex: -1,
+    mode: "sequential",
+
+    setView: (view) => set({ view }),
+    setMode: (mode) => set({ mode }),
+
+    playTrack: (track, list) => {
+      const state = get();
+      let queue = list && list.length ? [...list] : [...state.queue];
+      let index = queue.findIndex((item) => item.id === track.id);
+      if (index < 0) {
+        queue.push(track);
+        index = queue.length - 1;
+      }
+      playAt(queue, index);
+    },
+
+    playIndex: (index) => {
+      const queue = get().queue;
+      if (index >= 0 && index < queue.length) playAt(queue, index);
+    },
+
+    enqueue: (track) => {
+      const queue = get().queue;
+      if (queue.some((item) => item.id === track.id)) return;
+      set({ queue: [...queue, track] });
+    },
+
+    removeAt: (index) => {
+      const state = get();
+      const queue = state.queue.filter((_, i) => i !== index);
+      let currentIndex = state.currentIndex;
+      if (index < currentIndex) currentIndex -= 1;
+      if (currentIndex >= queue.length) currentIndex = queue.length - 1;
+      set({ queue, currentIndex });
+    },
+
+    next: (auto = false) => {
+      const { queue, currentIndex, mode } = get();
+      if (!queue.length) return;
+      let index = currentIndex;
+      if (mode === "repeat-one" && auto) {
+        index = currentIndex;
+      } else if (mode === "shuffle") {
+        index =
+          queue.length === 1
+            ? 0
+            : (currentIndex + 1 + Math.floor(Math.random() * (queue.length - 1))) %
+              queue.length;
+      } else if (currentIndex + 1 < queue.length) {
+        index = currentIndex + 1;
+      } else if (mode === "repeat-all") {
+        index = 0;
+      } else if (auto) {
+        void pauseTrack();
+        return;
+      }
+      playAt(queue, Math.max(0, index));
+    },
+
+    prev: () => {
+      const { queue, currentIndex, mode } = get();
+      if (!queue.length) return;
+      let index = currentIndex;
+      if (currentIndex > 0) index = currentIndex - 1;
+      else if (mode === "repeat-all") index = queue.length - 1;
+      playAt(queue, Math.max(0, index));
+    },
+
+    clearQueue: () => set({ queue: [], currentIndex: -1 }),
+  };
+});
