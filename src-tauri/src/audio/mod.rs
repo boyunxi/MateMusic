@@ -63,6 +63,7 @@ pub struct PlayerSnapshot {
     pub output_format: String,
     pub device: String,
     pub underruns: u64,
+    pub finished: bool,
     pub error: Option<String>,
     pub note: Option<String>,
 }
@@ -93,6 +94,7 @@ pub(crate) struct Shared {
     base_secs: AtomicU64,
     pub(crate) volume_bits: AtomicU32,
     pub(crate) underruns: AtomicU64,
+    finished: AtomicBool,
 }
 
 impl Shared {
@@ -104,6 +106,7 @@ impl Shared {
             base_secs: AtomicU64::new(0.0f64.to_bits()),
             volume_bits: AtomicU32::new(1.0f32.to_bits()),
             underruns: AtomicU64::new(0),
+            finished: AtomicBool::new(false),
         }
     }
 
@@ -155,6 +158,7 @@ impl Shared {
             output_format: meta.output_format.clone(),
             device: meta.device.clone(),
             underruns: self.underruns.load(Ordering::Relaxed),
+            finished: self.finished.load(Ordering::Relaxed),
             error: meta.error.clone(),
             note: meta.note.clone(),
         }
@@ -716,6 +720,7 @@ where
             match command {
                 Command::Load(path) => {
                     shared.playing.store(false, Ordering::Relaxed);
+                    shared.finished.store(false, Ordering::Relaxed);
                     output = None;
                     force_shared = false;
                     exclusive_guard = None;
@@ -798,6 +803,7 @@ where
                             if s.seek(0.0).is_ok() {
                                 shared.played_samples.store(0, Ordering::Relaxed);
                                 shared.set_base(0.0);
+                                shared.finished.store(false, Ordering::Relaxed);
                                 output = None;
                                 let effective_mode = if force_shared {
                                     OutputMode::Shared
@@ -835,6 +841,7 @@ where
                             Ok(()) => {
                                 shared.played_samples.store(0, Ordering::Relaxed);
                                 shared.set_base(secs.max(0.0));
+                                shared.finished.store(false, Ordering::Relaxed);
                                 output = None;
                                 exclusive_guard = None;
                                 let effective_mode = if force_shared {
@@ -879,6 +886,7 @@ where
                         if s.seek(snap.position).is_ok() {
                             shared.played_samples.store(0, Ordering::Relaxed);
                             shared.set_base(snap.position);
+                            shared.finished.store(false, Ordering::Relaxed);
                             output = None;
                             match create_active_output(preferred_mode, s, &shared, device_setup)
                             {
@@ -963,6 +971,7 @@ where
                 && shared.playing.load(Ordering::Relaxed)
             {
                 shared.playing.store(false, Ordering::Relaxed);
+                shared.finished.store(true, Ordering::Relaxed);
                 let duration = shared.meta.lock().map(|m| m.duration).unwrap_or(0.0);
                 shared.set_base(duration);
                 shared.played_samples.store(0, Ordering::Relaxed);

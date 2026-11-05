@@ -1,4 +1,5 @@
 pub mod audio;
+pub mod library;
 
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -88,6 +89,18 @@ pub fn run() {
                 let _ = handle.emit("playback://state", snapshot);
             });
             app.manage(EngineState(Mutex::new(engine)));
+
+            let data_dir = app
+                .path()
+                .app_data_dir()
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
+            let library = library::LibraryState::new(
+                data_dir.join("matemusic.db"),
+                data_dir.join("covers"),
+            )
+            .map_err(std::io::Error::other)?;
+            app.manage(library);
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -98,7 +111,15 @@ pub fn run() {
             player_seek,
             player_set_volume,
             player_set_output_mode,
-            player_state
+            player_state,
+            library::library_import_folder,
+            library::library_cancel_scan,
+            library::library_scan_status,
+            library::library_get_tracks,
+            library::library_get_folders,
+            library::library_stats,
+            library::settings_get_all,
+            library::settings_set
         ])
         .run(tauri::generate_context!())
         .expect("failed to run MateMusic");
