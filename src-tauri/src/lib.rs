@@ -89,6 +89,13 @@ fn player_set_volume(state: State<'_, EngineState>, volume: f32) {
 }
 
 #[tauri::command]
+fn player_set_speed(state: State<'_, EngineState>, speed: f32) {
+    if let Ok(engine) = state.0.lock() {
+        engine.set_speed(speed);
+    }
+}
+
+#[tauri::command]
 fn player_set_output_mode(state: State<'_, EngineState>, mode: String) -> Result<(), String> {
     let mode = OutputMode::parse(&mode).ok_or_else(|| format!("未知输出模式: {mode}"))?;
     if let Ok(engine) = state.0.lock() {
@@ -138,6 +145,7 @@ pub fn run() {
             player_pause,
             player_seek,
             player_set_volume,
+            player_set_speed,
             player_set_output_mode,
             player_state,
             library::library_import_folder,

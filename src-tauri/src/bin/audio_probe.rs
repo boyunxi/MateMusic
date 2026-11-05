@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, SampleFormat, SizedSample, StreamConfig};
-use matemusic_lib::audio::{AudioEngine, OutputMode};
+use matemusic_lib::audio::{AudioEngine, NextRequest, OutputMode};
 use matemusic_lib::lyrics;
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::DecoderOptions;
@@ -517,6 +517,131 @@ fn recovery_check(path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn speed_check(path: &Path) -> Result<()> {
+    let engine = AudioEngine::spawn(|snapshot| {
+        if let Some(err) = snapshot.error {
+            eprintln!("engine state error: {err}");
+        }
+    });
+    engine.set_output_mode(OutputMode::Shared);
+    engine.set_volume(0.2);
+    engine.load(path.to_path_buf());
+    std::thread::sleep(Duration::from_millis(1200));
+
+    let start = engine.snapshot();
+    println!(
+        "start: loaded={} playing={} pos={:.3} dur={:.3} speed={}",
+        start.loaded, start.playing, start.position, start.duration, start.speed
+    );
+    if !start.loaded || !start.playing {
+        return Err(start.error.unwrap_or_else(|| "加载失败".to_string()));
+    }
+
+    engine.set_speed(1.5);
+    std::thread::sleep(Duration::from_millis(1200));
+    let fast = engine.snapshot();
+    let fast_delta = fast.position - start.position;
+    println!(
+        "speed=1.5 pos={:.3} delta={:.3} mode={}",
+        fast.position, fast_delta, fast.output_mode
+    );
+    if (fast.speed - 1.5).abs() > 0.01 {
+        return Err(format!("倍速未生效: {}", fast.speed));
+    }
+    if fast_delta < 1.2 {
+        return Err(format!("1.5x 下源时间推进过慢: {fast_delta:.3}s"));
+    }
+
+    engine.set_speed(0.5);
+    std::thread::sleep(Duration::from_millis(1200));
+    let slow = engine.snapshot();
+    let slow_delta = slow.position - fast.position;
+    println!(
+        "speed=0.5 pos={:.3} delta={:.3}",
+        slow.position, slow_delta
+    );
+    if (slow.speed - 0.5).abs() > 0.01 {
+        return Err(format!("倍速未生效: {}", slow.speed));
+    }
+    if slow_delta > 0.95 {
+        return Err(format!("0.5x 下源时间推进过快: {slow_delta:.3}s"));
+    }
+
+    engine.set_speed(1.0);
+    std::thread::sleep(Duration::from_millis(500));
+    let normal = engine.snapshot();
+    println!(
+        "speed=1 pos={:.3} bitPerfect={} verdict={}",
+        normal.position, normal.bit_perfect, normal.bit_perfect_verdict
+    );
+
+    println!("speed check OK");
+    Ok(())
+}
+
+fn gapless_check(path: &Path) -> Result<()> {
+    let engine = AudioEngine::spawn(|snapshot| {
+        if let Some(err) = snapshot.error {
+            eprintln!("engine state error: {err}");
+        }
+    });
+    engine.set_output_mode(OutputMode::Shared);
+    engine.set_volume(0.2);
+    engine.load_range(path.to_path_buf(), 0.0, Some(2.0));
+    std::thread::sleep(Duration::from_millis(700));
+    engine.set_next(Some(NextRequest {
+        path: path.to_path_buf(),
+        start: 2.0,
+        end: Some(4.0),
+    }));
+
+    let before = engine.snapshot();
+    println!(
+        "before boundary: playing={} pos={:.3} segment={:.3} underruns={} mode={}",
+        before.playing, before.position, before.segment_start, before.underruns, before.output_mode
+    );
+    if !before.loaded || !before.playing {
+        return Err(before.error.unwrap_or_else(|| "加载失败".to_string()));
+    }
+
+    std::thread::sleep(Duration::from_millis(1600));
+    let after = engine.snapshot();
+    println!(
+        "after boundary: playing={} pos={:.3} segment={:.3} underruns={} mode={}",
+        after.playing, after.position, after.segment_start, after.underruns, after.output_mode
+    );
+
+    if !after.loaded || !after.playing {
+        return Err("无缝换轨后播放中断".to_string());
+    }
+    if (after.segment_start - 2.0).abs() > 0.05 {
+        return Err(format!("未切换到下一分轨: segment={}", after.segment_start));
+    }
+    if after.position > 1.4 {
+        return Err(format!("换轨后位置异常: {:.3}", after.position));
+    }
+    if after.underruns > before.underruns + 1 {
+        return Err(format!(
+            "换轨产生欠载: {} -> {}",
+            before.underruns, after.underruns
+        ));
+    }
+
+    engine.set_speed(1.5);
+    std::thread::sleep(Duration::from_millis(900));
+    let fast = engine.snapshot();
+    println!(
+        "after speed: pos={:.3} segment={:.3} playing={}",
+        fast.position, fast.segment_start, fast.playing
+    );
+    if !fast.playing || fast.position <= after.position {
+        return Err("无缝换轨后切换倍速失败".to_string());
+    }
+
+    println!("gapless check OK");
+    Ok(())
+}
+
 fn matrix_check(dir: &Path) -> Result<()> {
     let engine = AudioEngine::spawn(|snapshot| {
         if let Some(err) = snapshot.error {
@@ -600,6 +725,8 @@ fn usage() -> ! {
          \x20 audio_probe play   <file>\n\
          \x20 audio_probe engine <file>   # 流式引擎：加载/暂停/seek/恢复自检\n\
          \x20 audio_probe recovery <file> # 输出设备异常：暂停/重开/续播自检\n\
+         \x20 audio_probe speed  <file>   # 倍速时间伸缩与源时间轴映射自检\n\
+         \x20 audio_probe gapless <file>  # 预加载无缝换轨 + 换轨后倍速自检\n\
          \x20 audio_probe matrix <dir>    # 格式矩阵：解码与共享输出自检\n\
          \x20 audio_probe lyrics <file>   # 歌词解析自检\n\
          \x20 audio_probe wasapi          # WASAPI 共享/独占格式能力诊断\n"
@@ -626,6 +753,8 @@ fn main() {
         "play" => play(&path),
         "engine" => engine_check(&path),
         "recovery" => recovery_check(&path),
+        "speed" => speed_check(&path),
+        "gapless" => gapless_check(&path),
         "matrix" => matrix_check(&path),
         "lyrics" => lyrics_check(&path),
         _ => usage(),

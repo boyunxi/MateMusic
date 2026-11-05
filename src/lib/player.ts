@@ -21,6 +21,12 @@ export type PlayerSnapshot = {
   underruns: number;
   finished: boolean;
   segmentStart: number;
+  speed: number;
+  volume: number;
+  outputBits: number | null;
+  bitPerfect: boolean;
+  bitPerfectVerdict: "idle" | "bit-perfect" | "unverifiable" | "not-bit-perfect";
+  bitPerfectReasons: string[];
   error: string | null;
   note: string | null;
 };
@@ -76,6 +82,7 @@ export const playTrack = () => invoke<void>("player_play");
 export const pauseTrack = () => invoke<void>("player_pause");
 export const seekTrack = (position: number) => invoke<void>("player_seek", { position });
 export const setTrackVolume = (volume: number) => invoke<void>("player_set_volume", { volume });
+export const setPlaybackSpeed = (speed: number) => invoke<void>("player_set_speed", { speed });
 export const setOutputMode = (mode: "exclusive" | "shared") =>
   invoke<void>("player_set_output_mode", { mode });
 export const getPlayerState = () => invoke<PlayerSnapshot>("player_state");

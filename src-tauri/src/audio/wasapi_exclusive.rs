@@ -45,6 +45,14 @@ impl Encoding {
             Encoding::I24In32 | Encoding::I24 => "24 bit",
         }
     }
+
+    pub fn valid_bits(self) -> u32 {
+        match self {
+            Encoding::F32 => 32,
+            Encoding::I16 => 16,
+            Encoding::I24In32 | Encoding::I24 => 24,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -171,8 +179,12 @@ impl Sink {
             }
 
             if playing {
-                // 独占模式用硬件时钟定位；暂停期间写静音但冻结显示位置
-                let position = clock_position(&self.clock).saturating_sub(display_offset);
+                // 独占模式用硬件时钟定位；暂停期间写静音但冻结显示位置。
+                // exclusive_base 在无缝换轨或倍速切换时前移，保证 played_samples
+                // 始终是“当前分轨已播放帧数”，而不是输出流启动以来的绝对帧数。
+                let position = clock_position(&self.clock)
+                    .saturating_sub(display_offset)
+                    .saturating_sub(shared.exclusive_base.load(Ordering::Relaxed));
                 shared
                     .played_samples
                     .store(position, Ordering::Relaxed);

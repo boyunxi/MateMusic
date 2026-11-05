@@ -45,6 +45,7 @@ import {
   playTrack,
   seekTrack,
   setOutputMode,
+  setPlaybackSpeed,
   setPlayerNext,
   setTrackVolume,
   subscribePlayer,
@@ -65,6 +66,7 @@ import { getPlaybackState, savePlaybackState } from "../../lib/playback";
 import { getLyrics } from "../../lib/lyrics";
 import type { LyricDoc } from "../../lib/lyrics";
 import LyricsPanel from "../lyrics/LyricsPanel";
+import BitPerfectPanel from "../player/BitPerfectPanel";
 import ToastHost from "../../components/ToastHost";
 import LibraryView from "../library/LibraryView";
 import { useAppStore } from "../../store/useAppStore";
@@ -144,6 +146,8 @@ const LYRICS = [
 
 const LINE_HEIGHT = 38;
 
+const SPEED_OPTIONS = [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2];
+
 const MODE_LABELS: Record<PlayMode, string> = {
   sequential: "顺序播放",
   "repeat-all": "列表循环",
@@ -154,6 +158,10 @@ const MODE_LABELS: Record<PlayMode, string> = {
 function folderOf(path: string) {
   const parts = path.split(/[\\/]/);
   return parts.length > 1 ? parts[parts.length - 2] : "";
+}
+
+function speedLabel(value: number) {
+  return `${Number(value.toFixed(2))}×`;
 }
 
 const NAV: { label: string; icon: typeof Library; view: View }[] = [
@@ -244,6 +252,7 @@ export default function GlassDemo() {
   const [playing, setPlaying] = useState(true);
   const [time, setTime] = useState(18);
   const [volume, setVolume] = useState(0.72);
+  const [speed, setSpeed] = useState(1);
   const [liked, setLiked] = useState(false);
   const [snapshot, setSnapshot] = useState<PlayerSnapshot | null>(null);
   const [opening, setOpening] = useState(false);
@@ -362,6 +371,11 @@ export default function GlassDemo() {
         }
         if (settings.outputMode === "exclusive" || settings.outputMode === "shared") {
           setOutputPreference(settings.outputMode);
+        }
+        const storedSpeed = Number(settings.playbackSpeed);
+        if (SPEED_OPTIONS.includes(storedSpeed)) {
+          setSpeed(storedSpeed);
+          void setPlaybackSpeed(storedSpeed);
         }
         for (const [key, value] of Object.entries(settings)) {
           if (key.startsWith("lyricOffset:")) {
@@ -546,6 +560,11 @@ export default function GlassDemo() {
     void setSetting("outputMode", outputPreference);
   }, [outputPreference]);
 
+  useEffect(() => {
+    if (!inTauri || !settingsLoaded.current) return;
+    void setSetting("playbackSpeed", String(speed));
+  }, [speed]);
+
   // 演示模式的模拟时钟
   useEffect(() => {
     if (real || !playing) return;
@@ -554,27 +573,30 @@ export default function GlassDemo() {
     const tick = (now: number) => {
       const dt = (now - last) / 1000;
       last = now;
-      setTime((t) => Math.min(t + dt, track.duration));
+      setTime((t) => Math.min(t + dt * speed, track.duration));
       raf = requestAnimationFrame(tick);
     };
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
-  }, [real, playing, track.duration]);
+  }, [real, playing, track.duration, speed]);
 
-  // 真实播放时用事件位置校准，并在两次事件之间平滑推进
+  // 真实播放时用事件位置校准，并在两次事件之间按倍速平滑推进源时间
   useEffect(() => {
     if (!real || !isPlaying) return;
+    const playbackSpeed = loaded?.speed && loaded.speed > 0 ? loaded.speed : speed;
     let raf = 0;
     let last = performance.now();
     const tick = (now: number) => {
       const dt = (now - last) / 1000;
       last = now;
-      setTime((t) => (duration > 0 ? Math.min(t + dt, duration) : t + dt));
+      setTime((t) =>
+        duration > 0 ? Math.min(t + dt * playbackSpeed, duration) : t + dt * playbackSpeed,
+      );
       raf = requestAnimationFrame(tick);
     };
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
-  }, [real, isPlaying, duration]);
+  }, [real, isPlaying, duration, loaded?.speed, speed]);
 
   useEffect(() => {
     if (real || time < track.duration) return;
@@ -617,7 +639,14 @@ export default function GlassDemo() {
     nextRefresh,
     loaded?.outputMode,
     loaded?.device,
+    speed,
   ]);
+
+  useEffect(() => {
+    if (loaded && loaded.speed > 0 && Math.abs(loaded.speed - speed) > 0.001) {
+      setSpeed(loaded.speed);
+    }
+  }, [loaded?.speed, loaded?.path]);
 
   useEffect(() => {
     if (!loaded) return;
@@ -689,6 +718,18 @@ export default function GlassDemo() {
   const changeVolume = (value: number) => {
     setVolume(value);
     if (loaded) void setTrackVolume(value);
+  };
+
+  const changeSpeed = (value: number) => {
+    const next = Math.max(0.5, Math.min(2, value));
+    setSpeed(next);
+    if (inTauri) void setPlaybackSpeed(next);
+    setNextRefresh((current) => current + 1);
+  };
+
+  const cycleSpeed = () => {
+    const index = SPEED_OPTIONS.indexOf(speed);
+    changeSpeed(SPEED_OPTIONS[(index + 1) % SPEED_OPTIONS.length]);
   };
 
   const changeOutputMode = (mode: "exclusive" | "shared") => {
@@ -838,9 +879,24 @@ export default function GlassDemo() {
                 共享
               </button>
             </div>
+            <p className="tuning-title is-spaced">播放倍速</p>
+            <div className="speed-options" role="group" aria-label="播放倍速">
+              {SPEED_OPTIONS.map((value) => (
+                <button
+                  key={value}
+                  type="button"
+                  className={Math.abs(speed - value) < 0.001 ? "is-active" : ""}
+                  onClick={() => changeSpeed(value)}
+                  aria-pressed={Math.abs(speed - value) < 0.001}
+                >
+                  {speedLabel(value)}
+                </button>
+              ))}
+            </div>
             <p className="tuning-note">
               {loaded ? `${loaded.outputMode} · ${loaded.outputFormat}` : "演示模式 · 未接入音频"}
             </p>
+            <p className="tuning-note">倍速使用时间伸缩，歌词与 CUE 仍按源时间轴对齐。</p>
           </section>
         </aside>
 
@@ -873,11 +929,17 @@ export default function GlassDemo() {
               )}
             </section>
           ) : view === "settings" ? (
-            <section className="placeholder-view">
-              <p className="eyebrow">设置</p>
-              <h1>设置</h1>
-              <p>
-                主题、玻璃模糊、音量与输出模式会持久化；输出设备、曲库目录管理与快捷键将在后续接入。
+            <section className="settings-page">
+              <header className="lyrics-page-head">
+                <div>
+                  <p className="eyebrow">设置</p>
+                  <h1>输出与判定</h1>
+                </div>
+              </header>
+              <BitPerfectPanel snapshot={loaded} full />
+              <p className="settings-note">
+                主题、玻璃模糊、音量、输出模式与倍速会持久化。独占、采样率、位深与 DSP
+                四项都满足时才会标记 Bit-Perfect；共享混音与无法核验的位深不会被标记。
               </p>
             </section>
           ) : (
@@ -976,6 +1038,8 @@ export default function GlassDemo() {
                 </div>
               </section>
 
+              <BitPerfectPanel snapshot={loaded} />
+
               <section className="lyrics" aria-label="歌词">
                 {loaded ? (
                   <LyricsPanel
@@ -1030,6 +1094,15 @@ export default function GlassDemo() {
 
                 <div className="transport-row">
                   <div className="transport-side">
+                    <button
+                      type="button"
+                      className={`speed-cycle ${Math.abs(speed - 1) > 0.001 ? "is-active-mode" : ""}`}
+                      onClick={cycleSpeed}
+                      aria-label="切换播放倍速"
+                      aria-pressed={Math.abs(speed - 1) > 0.001}
+                    >
+                      {speedLabel(speed)}
+                    </button>
                     <button
                       type="button"
                       className={`icon-button ${playMode === "shuffle" ? "is-active-mode" : ""}`}

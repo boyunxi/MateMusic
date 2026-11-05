@@ -308,6 +308,56 @@
   background: rgba(255, 255, 255, 0.88);
 }
 
+.speed-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+  padding: 3px;
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.2);
+}
+
+.demo[data-theme="light"] .speed-options {
+  background: rgba(255, 255, 255, 0.42);
+}
+
+.speed-options button {
+  flex: 1 1 calc(25% - 3px);
+  padding: 4px 2px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-faint);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+
+.speed-options button.is-active {
+  color: var(--text-strong);
+  background: var(--tile-strong);
+}
+
+.speed-cycle {
+  display: grid;
+  place-items: center;
+  min-width: 46px;
+  height: 34px;
+  padding: 0 6px;
+  border: 1px solid var(--hairline);
+  border-radius: 9px;
+  background: var(--tile);
+  color: var(--text);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+
+.speed-cycle.is-active-mode {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
 .slider-label {
   display: flex;
   flex-direction: column;
@@ -393,7 +443,26 @@
   flex-direction: column;
   min-width: 0;
   padding: 24px 30px 22px;
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-width: none;
+}
+
+.now::-webkit-scrollbar {
+  display: none;
+}
+
+.settings-page {
+  display: flex;
+  flex-direction: column;
+}
+
+.settings-note {
+  margin: 14px 0 0;
+  max-width: 68ch;
+  color: var(--text-faint);
+  font-size: 11.5px;
+  line-height: 1.65;
 }
 
 .now-head {
@@ -515,7 +584,7 @@
 .cover {
   position: relative;
   flex: none;
-  width: min(236px, 30vh);
+  width: min(220px, 26vh);
   aspect-ratio: 1;
   border-radius: 20px;
   overflow: hidden;

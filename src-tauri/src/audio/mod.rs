@@ -1,3 +1,4 @@
+mod tempo;
 mod wasapi_exclusive;
 
 use std::fs::File;
@@ -27,6 +28,7 @@ use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 use symphonia::core::units::Time;
 
+use tempo::{TimeStretcher, MAX_SPEED, MIN_SPEED};
 use wasapi_exclusive::ExclusiveHandle;
 
 const RING_SECONDS: usize = 2;
@@ -69,6 +71,12 @@ pub struct PlayerSnapshot {
     pub underruns: u64,
     pub finished: bool,
     pub segment_start: f64,
+    pub speed: f32,
+    pub volume: f32,
+    pub output_bits: Option<u32>,
+    pub bit_perfect: bool,
+    pub bit_perfect_verdict: String,
+    pub bit_perfect_reasons: Vec<String>,
     pub error: Option<String>,
     pub note: Option<String>,
 }
@@ -87,6 +95,8 @@ struct Meta {
     output_rate: u32,
     output_channels: usize,
     output_format: String,
+    output_bits: Option<u32>,
+    exclusive: bool,
     device: String,
     error: Option<String>,
     note: Option<String>,
@@ -97,8 +107,10 @@ pub(crate) struct Shared {
     meta: Mutex<Meta>,
     pub(crate) playing: AtomicBool,
     pub(crate) played_samples: AtomicU64,
+    pub(crate) exclusive_base: AtomicU64,
     base_secs: AtomicU64,
     pub(crate) volume_bits: AtomicU32,
+    pub(crate) speed_bits: AtomicU32,
     pub(crate) underruns: AtomicU64,
     finished: AtomicBool,
     output_failed: AtomicBool,
@@ -110,8 +122,10 @@ impl Shared {
             meta: Mutex::new(Meta::default()),
             playing: AtomicBool::new(false),
             played_samples: AtomicU64::new(0),
+            exclusive_base: AtomicU64::new(0),
             base_secs: AtomicU64::new(0.0f64.to_bits()),
             volume_bits: AtomicU32::new(1.0f32.to_bits()),
+            speed_bits: AtomicU32::new(1.0f32.to_bits()),
             underruns: AtomicU64::new(0),
             finished: AtomicBool::new(false),
             output_failed: AtomicBool::new(false),
@@ -124,6 +138,19 @@ impl Shared {
 
     fn base(&self) -> f64 {
         f64::from_bits(self.base_secs.load(Ordering::Relaxed))
+    }
+
+    fn speed(&self) -> f32 {
+        f32::from_bits(self.speed_bits.load(Ordering::Relaxed))
+    }
+
+    fn set_speed(&self, speed: f32) {
+        let speed = if speed.is_finite() {
+            speed.clamp(MIN_SPEED, MAX_SPEED)
+        } else {
+            1.0
+        };
+        self.speed_bits.store(speed.to_bits(), Ordering::Relaxed);
     }
 
     pub(crate) fn report_error(&self, message: String) {
@@ -145,13 +172,23 @@ impl Shared {
 
     fn snapshot(&self) -> PlayerSnapshot {
         let meta = self.meta.lock().expect("player meta poisoned");
-        // played_samples 记录的是帧数，位置只按采样率换算，不能再除声道数
+        // played_samples 记录的是输出帧数；倍速下按 speed 映射回源时间轴
+        let speed = self.speed();
         let played = self.played_samples.load(Ordering::Relaxed) as f64
-            / (meta.output_rate.max(1) as f64);
+            / (meta.output_rate.max(1) as f64)
+            * speed as f64;
         let mut position = self.base() + played;
         if meta.duration > 0.0 {
             position = position.min(meta.duration);
         }
+        let volume = f32::from_bits(self.volume_bits.load(Ordering::Relaxed));
+        let loaded = meta.loaded && meta.error.is_none();
+        let (bit_perfect, bit_perfect_verdict, reasons) = evaluate_bit_perfect(
+            loaded,
+            &meta,
+            speed,
+            volume,
+        );
 
         PlayerSnapshot {
             loaded: meta.loaded,
@@ -172,10 +209,85 @@ impl Shared {
             underruns: self.underruns.load(Ordering::Relaxed),
             finished: self.finished.load(Ordering::Relaxed),
             segment_start: meta.segment_start,
+            speed,
+            volume,
+            output_bits: meta.output_bits,
+            bit_perfect,
+            bit_perfect_verdict: bit_perfect_verdict.to_string(),
+            bit_perfect_reasons: reasons,
             error: meta.error.clone(),
             note: meta.note.clone(),
         }
     }
+}
+
+fn evaluate_bit_perfect(
+    loaded: bool,
+    meta: &Meta,
+    speed: f32,
+    volume: f32,
+) -> (bool, &'static str, Vec<String>) {
+    if !loaded {
+        return (false, "idle", Vec::new());
+    }
+
+    let rate_match = meta.sample_rate > 0 && meta.sample_rate == meta.output_rate;
+    let channels_match = meta.channels > 0 && meta.channels == meta.output_channels;
+    let bits_match = meta
+        .bits
+        .zip(meta.output_bits)
+        .map(|(source, output)| source == output)
+        .unwrap_or(false);
+    let dsp_active = (speed - 1.0).abs() > 1e-4 || (volume - 1.0).abs() > 1e-4;
+
+    let mut reasons = Vec::new();
+    if !meta.exclusive {
+        reasons.push(if meta.output_mode.contains("共享") {
+            "当前为 WASAPI 共享输出，系统混音参与".to_string()
+        } else {
+            "独占输出未生效".to_string()
+        });
+    }
+    if !rate_match {
+        reasons.push(format!(
+            "采样率不一致：源 {} Hz / 输出 {} Hz",
+            meta.sample_rate, meta.output_rate
+        ));
+    }
+    if !channels_match {
+        reasons.push(format!(
+            "声道不一致：源 {} / 输出 {}",
+            meta.channels, meta.output_channels
+        ));
+    }
+    if !bits_match {
+        match meta.bits {
+            Some(source) => reasons.push(format!(
+                "位深未保持：源 {} bit / 输出 {}",
+                source,
+                meta.output_bits
+                    .map(|bits| format!("{bits} bit"))
+                    .unwrap_or_else(|| "未知".to_string())
+            )),
+            None => reasons.push("源位深未知，无法验证位深保持".to_string()),
+        }
+    }
+    if (speed - 1.0).abs() > 1e-4 {
+        reasons.push(format!("倍速时间伸缩已启用（{}×）", speed));
+    }
+    if (volume - 1.0).abs() > 1e-4 {
+        reasons.push(format!("音量处理未保持 100%（{:.0}%）", volume * 100.0));
+    }
+
+    let bit_perfect = meta.exclusive && rate_match && channels_match && bits_match && !dsp_active;
+    let verdict = if bit_perfect {
+        "bit-perfect"
+    } else if !meta.exclusive {
+        "unverifiable"
+    } else {
+        "not-bit-perfect"
+    };
+    (bit_perfect, verdict, reasons)
 }
 
 pub struct NextRequest {
@@ -195,6 +307,7 @@ enum Command {
     Pause,
     Seek(f64),
     SetVolume(f32),
+    SetSpeed(f32),
     SetOutputMode(OutputMode),
 }
 
@@ -250,6 +363,15 @@ impl AudioEngine {
 
     pub fn set_volume(&self, volume: f32) {
         let _ = self.tx.send(Command::SetVolume(volume.clamp(0.0, 1.0)));
+    }
+
+    pub fn set_speed(&self, speed: f32) {
+        let speed = if speed.is_finite() {
+            speed.clamp(MIN_SPEED, MAX_SPEED)
+        } else {
+            1.0
+        };
+        let _ = self.tx.send(Command::SetSpeed(speed));
     }
 
     pub fn set_output_mode(&self, mode: OutputMode) {
@@ -538,13 +660,21 @@ fn extension_of(path: &Path) -> String {
 
 fn unsupported_message(path: &Path, detail: &str) -> String {
     match extension_of(path).as_str() {
-        "ape" => "缺少 APE 解码器：首期使用 Symphonia，APE 将在 M3 通过 FFmpeg 支持".to_string(),
-        "wma" => "缺少 WMA 解码器：首期使用 Symphonia，WMA 将在 M3 通过 FFmpeg 支持".to_string(),
+        "ape" => {
+            "缺少 APE 解码器：当前构建只启用 Symphonia，未包含 APE 解码器（未引入 FFmpeg）"
+                .to_string()
+        }
+        "wma" => {
+            "缺少 WMA 解码器：当前构建只启用 Symphonia，未包含 WMA 解码器（未引入 FFmpeg）"
+                .to_string()
+        }
         "opus" => {
-            "缺少 Opus 解码器：Symphonia 首期不支持 Opus，M3 通过 FFmpeg 支持".to_string()
+            "缺少 Opus 解码器：当前构建未包含 Opus 解码器（未引入 FFmpeg），无法播放"
+                .to_string()
         }
         "dsf" | "dff" => {
-            "缺少 DSD 解码器：首期不支持原生 DSD / DSF，M3 将以 PCM 解码".to_string()
+            "缺少 DSD 解码器：当前构建未包含 DSD 转 PCM 解码器（未引入 FFmpeg），暂不支持 DSF / DFF"
+                .to_string()
         }
         _ => format!("无法识别容器格式：{detail}"),
     }
@@ -565,10 +695,14 @@ struct Session {
     file_duration: f64,
     segment_start: f64,
     segment_duration: f64,
+    current_offset: f64,
     out_rate: u32,
     out_channels: usize,
     emitted_frames: u64,
     frames_limit: Option<u64>,
+    speed: f32,
+    tempo: TimeStretcher,
+    tempo_out: Vec<f32>,
 }
 
 impl Session {
@@ -689,10 +823,14 @@ impl Session {
             file_duration: duration,
             segment_start: 0.0,
             segment_duration: duration,
+            current_offset: 0.0,
             out_rate: 0,
             out_channels: 0,
             emitted_frames: 0,
             frames_limit: None,
+            speed: 1.0,
+            tempo: TimeStretcher::new(channels, sample_rate, 1.0),
+            tempo_out: Vec::new(),
         };
 
         Ok((session, info))
@@ -705,7 +843,7 @@ impl Session {
         self.out_rate = out_rate;
         self.out_channels = out_channels.max(1);
         self.emitted_frames = 0;
-        self.frames_limit = self.limit_for_offset(0.0);
+        self.frames_limit = self.limit_for_offset(self.current_offset);
     }
 
     fn set_range(&mut self, start: f64, end: Option<f64>) {
@@ -714,6 +852,7 @@ impl Session {
             Some(end) => (end - self.segment_start).max(0.0),
             None => (self.file_duration - self.segment_start).max(0.0),
         };
+        self.current_offset = 0.0;
         self.emitted_frames = 0;
         self.frames_limit = self.limit_for_offset(0.0);
     }
@@ -723,7 +862,18 @@ impl Session {
             return None;
         }
         let remaining = (self.segment_duration - offset.max(0.0)).max(0.0);
-        Some((remaining * self.out_rate as f64).round() as u64)
+        let speed = self.speed.max(0.01) as f64;
+        Some((remaining / speed * self.out_rate as f64).round() as u64)
+    }
+
+    fn set_speed(&mut self, speed: f32) {
+        self.speed = if speed.is_finite() {
+            speed.clamp(MIN_SPEED, MAX_SPEED)
+        } else {
+            1.0
+        };
+        self.tempo.reset(self.speed);
+        self.tempo_out.clear();
     }
 
     fn remaining_output_samples(&self) -> Option<usize> {
@@ -761,10 +911,13 @@ impl Session {
             .map_err(|e| format!("跳转失败: {e}"))?;
         self.decoder.reset();
         self.resampler.reset();
+        self.tempo.reset(self.speed);
+        self.tempo_out.clear();
         self.sample_buf = None;
         self.sample_spec = None;
         self.pending.clear();
         self.finished = false;
+        self.current_offset = relative;
         self.emitted_frames = 0;
         self.frames_limit = self.limit_for_offset(relative);
         Ok(())
@@ -773,7 +926,25 @@ impl Session {
     fn mark_finished(&mut self) -> Result<(), String> {
         if !self.finished {
             self.finished = true;
+            if (self.speed - 1.0).abs() > 1e-4 {
+                self.tempo_out.clear();
+                self.tempo.flush(&mut self.tempo_out);
+                if !self.tempo_out.is_empty() {
+                    self.resampler
+                        .process(&self.tempo_out, &mut self.pending)
+                        .map_err(|error| format!("重采样失败: {error}"))?;
+                }
+            }
             self.resampler.flush(&mut self.pending)?;
+        }
+        Ok(())
+    }
+
+    fn prefill_output(&mut self, target_samples: usize) -> Result<(), String> {
+        let mut guard = 0;
+        while self.pending.len() < target_samples && !self.finished && guard < 8192 {
+            self.decode_next()?;
+            guard += 1;
         }
         Ok(())
     }
@@ -819,9 +990,19 @@ impl Session {
                     .as_mut()
                     .expect("sample buffer initialized above");
                 buf.copy_interleaved_ref(audio_buf);
-                self.resampler
-                    .process(buf.samples(), &mut self.pending)
-                    .map_err(|e| format!("重采样失败: {e}"))?;
+                if (self.speed - 1.0).abs() <= 1e-4 {
+                    self.resampler
+                        .process(buf.samples(), &mut self.pending)
+                        .map_err(|e| format!("重采样失败: {e}"))?;
+                } else {
+                    self.tempo_out.clear();
+                    self.tempo.process(buf.samples(), &mut self.tempo_out);
+                    if !self.tempo_out.is_empty() {
+                        self.resampler
+                            .process(&self.tempo_out, &mut self.pending)
+                            .map_err(|e| format!("重采样失败: {e}"))?;
+                    }
+                }
             }
             Err(SymphoniaError::DecodeError(_)) => {}
             Err(SymphoniaError::IoError(e)) if e.kind() == ErrorKind::UnexpectedEof => {
@@ -957,6 +1138,15 @@ fn make_ring(rate: u32, channels: usize) -> (HeapProd<f32>, Arc<Mutex<HeapCons<f
     (producer, Arc::new(Mutex::new(consumer)))
 }
 
+fn sample_format_bits(format: SampleFormat) -> Option<u32> {
+    match format {
+        SampleFormat::F32 | SampleFormat::I32 | SampleFormat::U32 => Some(32),
+        SampleFormat::F64 => Some(64),
+        SampleFormat::I16 | SampleFormat::U16 => Some(16),
+        _ => None,
+    }
+}
+
 fn sample_format_label(format: SampleFormat) -> &'static str {
     match format {
         SampleFormat::F32 => "32 bit float",
@@ -973,6 +1163,7 @@ fn create_active_output(
     shared: &Arc<Shared>,
     setup: &DeviceSetup,
 ) -> Result<ActiveOutput, String> {
+    shared.exclusive_base.store(0, Ordering::Relaxed);
     if pref == OutputMode::Exclusive {
         let (producer, consumer) = make_ring(session.src_rate, session.src_channels);
         match wasapi_exclusive::spawn(
@@ -989,6 +1180,8 @@ fn create_active_output(
                     meta.output_rate = negotiated.rate;
                     meta.output_channels = negotiated.channels;
                     meta.output_format = negotiated.encoding.label().to_string();
+                    meta.output_bits = Some(negotiated.encoding.valid_bits());
+                    meta.exclusive = true;
                 }
                 eprintln!(
                     "audio output: exclusive {} Hz / {} ch / {}",
@@ -1057,6 +1250,8 @@ fn create_active_output(
         meta.output_rate = mix_rate;
         meta.output_channels = mix_channels;
         meta.output_format = sample_format_label(setup.sample_format).to_string();
+        meta.output_bits = sample_format_bits(setup.sample_format);
+        meta.exclusive = false;
     }
 
     Ok(ActiveOutput {
@@ -1214,6 +1409,7 @@ where
 
                     match Session::open(&path) {
                         Ok((mut new_session, info)) => {
+                            new_session.set_speed(shared.speed());
                             new_session.set_range(start, end);
                             if end.is_some() && new_session.segment_duration <= 0.0 {
                                 let error = "分轨区间无效：结束时间必须大于开始时间".to_string();
@@ -1295,48 +1491,47 @@ where
                 Command::SetNext(next) => {
                     preloaded = None;
                     if let Some(request) = next {
-                        let shared_mode = output
-                            .as_ref()
-                            .map(|out| out.mode == OutputMode::Shared)
-                            .unwrap_or(false);
-                        if shared_mode {
-                            let (out_rate, out_channels) = shared
-                                .meta
-                                .lock()
-                                .map(|meta| (meta.output_rate, meta.output_channels))
-                                .unwrap_or((0, 0));
-                            if out_rate > 0 && out_channels > 0 {
-                                match Session::open(&request.path) {
-                                    Ok((mut next_session, info)) => {
-                                        let start = request.start.max(0.0);
-                                        next_session.set_range(start, request.end);
-                                        if start > 0.0 {
-                                            if let Err(error) = next_session.seek(0.0) {
-                                                eprintln!("gapless preload seek failed: {error}");
-                                            }
+                        let (out_rate, out_channels) = shared
+                            .meta
+                            .lock()
+                            .map(|meta| (meta.output_rate, meta.output_channels))
+                            .unwrap_or((0, 0));
+                        if out_rate > 0 && out_channels > 0 && output.is_some() {
+                            match Session::open(&request.path) {
+                                Ok((mut next_session, info)) => {
+                                    let start = request.start.max(0.0);
+                                    next_session.set_speed(shared.speed());
+                                    next_session.set_range(start, request.end);
+                                    if start > 0.0 {
+                                        if let Err(error) = next_session.seek(0.0) {
+                                            eprintln!("gapless preload seek failed: {error}");
                                         }
-                                        next_session.configure_output(out_rate, out_channels);
-                                        let duration = next_session.segment_duration;
-                                        preloaded = Some(Preloaded {
-                                            session: next_session,
-                                            info: NextInfo {
-                                                path: request
-                                                    .path
-                                                    .to_string_lossy()
-                                                    .to_string(),
-                                                title: info.title,
-                                                codec: info.codec,
-                                                sample_rate: info.sample_rate,
-                                                bits: info.bits,
-                                                channels: info.channels,
-                                                duration,
-                                                segment_start: start,
-                                            },
-                                        });
                                     }
-                                    Err(error) => {
-                                        eprintln!("gapless preload failed: {error}");
+                                    next_session.configure_output(out_rate, out_channels);
+                                    let target = out_rate as usize * out_channels.max(1) * 350 / 1000;
+                                    if let Err(error) = next_session.prefill_output(target) {
+                                        eprintln!("gapless prefill failed: {error}");
                                     }
+                                    let duration = next_session.segment_duration;
+                                    preloaded = Some(Preloaded {
+                                        session: next_session,
+                                        info: NextInfo {
+                                            path: request
+                                                .path
+                                                .to_string_lossy()
+                                                .to_string(),
+                                            title: info.title,
+                                            codec: info.codec,
+                                            sample_rate: info.sample_rate,
+                                            bits: info.bits,
+                                            channels: info.channels,
+                                            duration,
+                                            segment_start: start,
+                                        },
+                                    });
+                                }
+                                Err(error) => {
+                                    eprintln!("gapless preload failed: {error}");
                                 }
                             }
                         }
@@ -1456,6 +1651,40 @@ where
                         .volume_bits
                         .store(volume.to_bits(), Ordering::Relaxed);
                 }
+                Command::SetSpeed(speed) => {
+                    let snap = shared.snapshot();
+                    shared.set_speed(speed);
+                    preloaded = None;
+                    transition = None;
+                    exclusive_guard = None;
+                    if let Some(session_ref) = session.as_mut() {
+                        let was_playing = shared.playing.load(Ordering::Relaxed);
+                        shared.playing.store(false, Ordering::Relaxed);
+                        let exclusive = output
+                            .as_ref()
+                            .map(|out| out.mode == OutputMode::Exclusive)
+                            .unwrap_or(false);
+                        if exclusive {
+                            let played = shared.played_samples.load(Ordering::Relaxed);
+                            shared.exclusive_base.fetch_add(played, Ordering::Relaxed);
+                        }
+                        if let Some(out) = output.as_ref() {
+                            if let Ok(mut consumer) = out.consumer.lock() {
+                                consumer.clear();
+                            }
+                        }
+                        session_ref.set_speed(speed);
+                        match session_ref.seek(snap.position) {
+                            Ok(()) => {
+                                shared.played_samples.store(0, Ordering::Relaxed);
+                                shared.set_base(snap.position);
+                                shared.finished.store(false, Ordering::Relaxed);
+                                shared.playing.store(was_playing, Ordering::Relaxed);
+                            }
+                            Err(error) => shared.report_error(error),
+                        }
+                    }
+                }
                 Command::SetOutputMode(mode) => {
                     preferred_mode = mode;
                     force_shared = mode == OutputMode::Shared;
@@ -1533,6 +1762,15 @@ where
             if played >= pending.at_frames {
                 let pending = transition.take().expect("transition checked above");
                 let remainder = played - pending.at_frames;
+                let exclusive = output
+                    .as_ref()
+                    .map(|out| out.mode == OutputMode::Exclusive)
+                    .unwrap_or(false);
+                if exclusive {
+                    shared
+                        .exclusive_base
+                        .fetch_add(pending.at_frames, Ordering::Relaxed);
+                }
                 shared.played_samples.store(remainder, Ordering::Relaxed);
                 shared.set_base(0.0);
                 shared.finished.store(false, Ordering::Relaxed);
@@ -1618,5 +1856,73 @@ where
         }
 
         thread::sleep(Duration::from_millis(2));
+    }
+}
+
+#[cfg(test)]
+mod bitperfect_tests {
+    use super::*;
+
+    fn exclusive_meta() -> Meta {
+        Meta {
+            loaded: true,
+            sample_rate: 44_100,
+            output_rate: 44_100,
+            channels: 2,
+            output_channels: 2,
+            bits: Some(16),
+            output_bits: Some(16),
+            exclusive: true,
+            output_mode: "WASAPI 独占".to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn exclusive_matching_format_is_bit_perfect() {
+        let (perfect, verdict, reasons) =
+            evaluate_bit_perfect(true, &exclusive_meta(), 1.0, 1.0);
+        assert!(perfect);
+        assert_eq!(verdict, "bit-perfect");
+        assert!(reasons.is_empty());
+    }
+
+    #[test]
+    fn shared_output_is_unverifiable() {
+        let mut meta = exclusive_meta();
+        meta.exclusive = false;
+        meta.output_mode = "WASAPI 共享".to_string();
+        let (perfect, verdict, reasons) = evaluate_bit_perfect(true, &meta, 1.0, 1.0);
+        assert!(!perfect);
+        assert_eq!(verdict, "unverifiable");
+        assert!(reasons.iter().any(|reason| reason.contains("共享")));
+    }
+
+    #[test]
+    fn resampling_or_dsp_blocks_bit_perfect() {
+        let mut meta = exclusive_meta();
+        meta.output_rate = 48_000;
+        let (perfect, verdict, reasons) = evaluate_bit_perfect(true, &meta, 1.0, 1.0);
+        assert!(!perfect);
+        assert_eq!(verdict, "not-bit-perfect");
+        assert!(reasons.iter().any(|reason| reason.contains("采样率")));
+
+        let (perfect, _, reasons) = evaluate_bit_perfect(true, &exclusive_meta(), 1.25, 1.0);
+        assert!(!perfect);
+        assert!(reasons.iter().any(|reason| reason.contains("倍速")));
+
+        let (perfect, _, reasons) = evaluate_bit_perfect(true, &exclusive_meta(), 1.0, 0.8);
+        assert!(!perfect);
+        assert!(reasons.iter().any(|reason| reason.contains("音量")));
+    }
+
+    #[test]
+    fn unknown_source_bits_cannot_be_verified() {
+        let mut meta = exclusive_meta();
+        meta.bits = None;
+        let (perfect, verdict, reasons) = evaluate_bit_perfect(true, &meta, 1.0, 1.0);
+        assert!(!perfect);
+        assert_eq!(verdict, "not-bit-perfect");
+        assert!(reasons.iter().any(|reason| reason.contains("位深")));
     }
 }
