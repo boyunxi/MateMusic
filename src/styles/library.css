@@ -96,7 +96,7 @@
 }
 
 .playlist-chip.is-active {
-  border-color: rgba(143, 227, 213, 0.35);
+  border-color: var(--accent-glow, rgba(143, 227, 213, 0.35));
   background: var(--accent-soft);
   color: var(--text-strong);
 }
@@ -372,7 +372,7 @@
 }
 
 .track-row.is-current {
-  border-color: rgba(143, 227, 213, 0.22);
+  border-color: var(--accent-glow, rgba(143, 227, 213, 0.22));
   background: linear-gradient(120deg, var(--accent-soft), rgba(255, 255, 255, 0.03));
 }
 

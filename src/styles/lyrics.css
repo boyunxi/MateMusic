@@ -55,7 +55,7 @@
 .lp-line.is-active .lp-text {
   font-size: 17px;
   font-weight: 550;
-  text-shadow: 0 0 24px rgba(143, 227, 213, 0.18);
+  text-shadow: 0 0 24px var(--accent-glow, rgba(143, 227, 213, 0.18));
 }
 
 .lp-translation {
@@ -87,7 +87,7 @@
   background-clip: text;
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
-  filter: drop-shadow(0 0 10px rgba(143, 227, 213, 0.22));
+  filter: drop-shadow(0 0 10px var(--accent-glow, rgba(143, 227, 213, 0.22)));
 }
 
 .lp-state {

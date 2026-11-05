@@ -24,6 +24,7 @@ import {
   ListMusic,
   Maximize2,
   Mic2,
+  Minimize2,
   Moon,
   Pause,
   Play,
@@ -63,6 +64,7 @@ import {
 } from "../../lib/library";
 import type { LibraryTrack, ScanStatus } from "../../lib/library";
 import { getPlaybackState, savePlaybackState } from "../../lib/playback";
+import { coverPaletteStyle, useCoverPalette } from "../../lib/coverColor";
 import { getLyrics } from "../../lib/lyrics";
 import type { LyricDoc } from "../../lib/lyrics";
 import LyricsPanel from "../lyrics/LyricsPanel";
@@ -258,6 +260,7 @@ export default function GlassDemo() {
   const [opening, setOpening] = useState(false);
   const [bridgeError, setBridgeError] = useState<string | null>(null);
   const [outputPreference, setOutputPreference] = useState<"exclusive" | "shared">("exclusive");
+  const [immersive, setImmersive] = useState(false);
 
   const view = useAppStore((state) => state.view);
   const setView = useAppStore((state) => state.setView);
@@ -322,10 +325,20 @@ export default function GlassDemo() {
       : `art-${track.art}`;
   const heroCover = coverUrl(queueTrack?.coverPath ?? null);
   const coverKey = queueTrack ? `lib-${queueTrack.id}` : loaded ? loaded.path : track.art;
+  const coverPalette = useCoverPalette(heroCover, theme);
+  const paletteStyle = coverPalette ? coverPaletteStyle(coverPalette) : undefined;
 
   const applySnapshot = useCallback((state: PlayerSnapshot) => {
     setSnapshot(state);
     if (state.loaded) setTime(state.position);
+  }, []);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setImmersive(false);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
   }, []);
 
   useEffect(() => {
@@ -794,7 +807,12 @@ export default function GlassDemo() {
   };
 
   return (
-    <div className="demo" data-theme={theme} style={{ "--glass-blur": `${blur}px` } as CSSProperties}>
+    <div
+      className="demo"
+      data-theme={theme}
+      data-immersive={immersive ? "true" : "false"}
+      style={{ "--glass-blur": `${blur}px`, ...paletteStyle } as CSSProperties}
+    >
       <div className="backdrop" aria-hidden="true">
         <div className="aurora" />
         <div className="aurora aurora-alt" />
@@ -802,7 +820,7 @@ export default function GlassDemo() {
         <div className="grain" />
       </div>
 
-      <div className="layout">
+      <div className={`layout ${immersive ? "is-immersive" : ""}`}>
         <aside className="rail glass">
           <div className="brand">
             <span className="brand-mark" />
@@ -945,12 +963,22 @@ export default function GlassDemo() {
           ) : (
             <>
               <header className="now-head">
-                <p className="eyebrow">正在播放</p>
+                <p className="eyebrow">{immersive ? "沉浸播放" : "正在播放"}</p>
                 <div className="head-actions">
-                  {inTauri && (
+                  {inTauri && !immersive && (
                     <button className="open-file" type="button" onClick={handleOpen} disabled={opening}>
                       <FolderOpen size={15} />
                       {opening ? "读取中…" : real ? "更换音频" : "打开音频"}
+                    </button>
+                  )}
+                  {immersive && (
+                    <button
+                      className="open-file"
+                      type="button"
+                      onClick={() => setImmersive(false)}
+                    >
+                      <Minimize2 size={15} />
+                      退出沉浸
                     </button>
                   )}
                   <span className="output-chip">
@@ -1002,48 +1030,59 @@ export default function GlassDemo() {
                     >
                       <Heart size={18} fill={liked ? "currentColor" : "none"} />
                     </button>
-                    <button type="button" className="icon-button" aria-label="沉浸模式">
-                      <Maximize2 size={18} />
+                    <button
+                      type="button"
+                      className="icon-button"
+                      onClick={() => setImmersive((value) => !value)}
+                      aria-label={immersive ? "退出沉浸模式" : "进入沉浸模式"}
+                      aria-pressed={immersive}
+                    >
+                      {immersive ? <Minimize2 size={18} /> : <Maximize2 size={18} />}
                     </button>
                   </div>
                 </div>
               </section>
 
-              <section className="audio-info" aria-label="音频参数">
-                <div>
-                  <span>源文件</span>
-                  <strong>
-                    {loaded
-                      ? `${displayCodec ? prettifyCodec(displayCodec) : "未知"} · ${displayBits ?? "?"} bit · ${formatHz(displayRate ?? 0)}`
-                      : "FLAC · 24 bit · 96 kHz"}
-                  </strong>
-                </div>
-                <div>
-                  <span>解码</span>
-                  <strong>PCM · 32 bit float</strong>
-                </div>
-                <div>
-                  <span>输出</span>
-                  <strong
-                    title={
-                      loaded
-                        ? `${loaded.outputMode} · ${formatHz(loaded.outputRate)} · ${loaded.outputFormat}`
-                        : undefined
-                    }
-                  >
-                    {loaded
-                      ? `${loaded.outputMode} · ${formatHz(loaded.outputRate)} · ${loaded.outputFormat}`
-                      : "WASAPI 独占 · 96 kHz"}
-                  </strong>
-                </div>
-              </section>
+              {!immersive && (
+                <>
+                  <section className="audio-info" aria-label="音频参数">
+                    <div>
+                      <span>源文件</span>
+                      <strong>
+                        {loaded
+                          ? `${displayCodec ? prettifyCodec(displayCodec) : "未知"} · ${displayBits ?? "?"} bit · ${formatHz(displayRate ?? 0)}`
+                          : "FLAC · 24 bit · 96 kHz"}
+                      </strong>
+                    </div>
+                    <div>
+                      <span>解码</span>
+                      <strong>PCM · 32 bit float</strong>
+                    </div>
+                    <div>
+                      <span>输出</span>
+                      <strong
+                        title={
+                          loaded
+                            ? `${loaded.outputMode} · ${formatHz(loaded.outputRate)} · ${loaded.outputFormat}`
+                            : undefined
+                        }
+                      >
+                        {loaded
+                          ? `${loaded.outputMode} · ${formatHz(loaded.outputRate)} · ${loaded.outputFormat}`
+                          : "WASAPI 独占 · 96 kHz"}
+                      </strong>
+                    </div>
+                  </section>
 
-              <BitPerfectPanel snapshot={loaded} />
+                  <BitPerfectPanel snapshot={loaded} />
+                </>
+              )}
 
               <section className="lyrics" aria-label="歌词">
                 {loaded ? (
                   <LyricsPanel
-                    compact
+                    compact={!immersive}
+                    fill={immersive}
                     doc={lyrics}
                     loading={lyricsLoading}
                     error={lyricsError}

@@ -25,6 +25,6 @@ button {
 
 button:focus-visible,
 input:focus-visible {
-  outline: 2px solid rgba(143, 227, 213, 0.7);
+  outline: 2px solid var(--accent-glow, rgba(143, 227, 213, 0.7));
   outline-offset: 2px;
 }

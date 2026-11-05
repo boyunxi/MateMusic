@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import type { LyricDoc, LyricLine, LyricWord } from "../../lib/lyrics";
 
@@ -11,6 +11,7 @@ type Props = {
   onOffsetChange: (value: number) => void;
   onSeek: (seconds: number) => void;
   compact?: boolean;
+  fill?: boolean;
 };
 
 const COMPACT_HEIGHT = 168;
@@ -74,11 +75,30 @@ export default function LyricsPanel({
   onOffsetChange,
   onSeek,
   compact = false,
+  fill = false,
 }: Props) {
+  const [measuredHeight, setMeasuredHeight] = useState(0);
+  const viewportRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!fill) return;
+    const element = viewportRef.current;
+    if (!element) return;
+    const update = () => setMeasuredHeight(element.clientHeight);
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [fill, loading, doc]);
+
   const totalOffset = (doc?.offsetMs ?? 0) + offsetMs;
   const effectiveMs = position * 1000 + totalOffset;
   const lineHeight = compact ? COMPACT_LINE : FULL_LINE;
-  const viewportHeight = compact ? COMPACT_HEIGHT : FULL_HEIGHT;
+  const viewportHeight = fill
+    ? Math.max(measuredHeight, 160)
+    : compact
+      ? COMPACT_HEIGHT
+      : FULL_HEIGHT;
 
   const active = useMemo(
     () => (doc && doc.synced ? activeLineIndex(doc, effectiveMs) : -1),
@@ -159,8 +179,9 @@ export default function LyricsPanel({
       )}
 
       <div
+        ref={viewportRef}
         className="lp-viewport"
-        style={{ height: viewportHeight }}
+        style={fill ? { flex: 1, minHeight: 0 } : { height: viewportHeight }}
         aria-label="歌词"
       >
         <div

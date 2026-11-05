@@ -85,7 +85,7 @@
 .bp-badge.is-good {
   background: var(--accent-soft);
   color: var(--accent);
-  box-shadow: inset 0 0 0 1px rgba(143, 227, 213, 0.38);
+  box-shadow: inset 0 0 0 1px var(--accent-glow, rgba(143, 227, 213, 0.38));
 }
 
 .bp-badge.is-warn {
@@ -166,7 +166,7 @@
 
 .bp-checks .is-ok i {
   background: var(--accent);
-  box-shadow: 0 0 8px rgba(143, 227, 213, 0.6);
+  box-shadow: 0 0 8px var(--accent-glow, rgba(143, 227, 213, 0.6));
 }
 
 .bp-checks .is-off i {
