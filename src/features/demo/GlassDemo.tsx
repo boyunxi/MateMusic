@@ -36,6 +36,7 @@ import {
   Sun,
   Volume2,
   VolumeX,
+  X,
 } from "lucide-react";
 import {
   getPlayerState,
@@ -261,6 +262,9 @@ export default function GlassDemo() {
   const [bridgeError, setBridgeError] = useState<string | null>(null);
   const [outputPreference, setOutputPreference] = useState<"exclusive" | "shared">("exclusive");
   const [immersive, setImmersive] = useState(false);
+  const [queueOpen, setQueueOpen] = useState(() =>
+    typeof window === "undefined" ? true : window.innerWidth > 1180,
+  );
 
   const view = useAppStore((state) => state.view);
   const setView = useAppStore((state) => state.setView);
@@ -327,6 +331,7 @@ export default function GlassDemo() {
   const coverKey = queueTrack ? `lib-${queueTrack.id}` : loaded ? loaded.path : track.art;
   const coverPalette = useCoverPalette(heroCover, theme);
   const paletteStyle = coverPalette ? coverPaletteStyle(coverPalette) : undefined;
+  const hasMini = view !== "now" && !immersive;
 
   const applySnapshot = useCallback((state: PlayerSnapshot) => {
     setSnapshot(state);
@@ -339,6 +344,12 @@ export default function GlassDemo() {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
+
+  useEffect(() => {
+    const onResize = () => setQueueOpen(window.innerWidth > 1180);
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
   }, []);
 
   useEffect(() => {
@@ -780,6 +791,14 @@ export default function GlassDemo() {
 
   const errorText = loaded?.error ?? bridgeError;
   const hasQueue = queue.length > 0;
+  const goPrevious = () => {
+    if (hasQueue) prevTrack();
+    else selectTrack((index - 1 + TRACKS.length) % TRACKS.length);
+  };
+  const goNext = () => {
+    if (hasQueue) nextTrack();
+    else selectTrack((index + 1) % TRACKS.length);
+  };
 
   useEffect(() => {
     if (!errorText) {
@@ -826,7 +845,11 @@ export default function GlassDemo() {
         <div className="grain" />
       </div>
 
-      <div className={`layout ${immersive ? "is-immersive" : ""}`}>
+      <div
+        className={`layout ${immersive ? "is-immersive" : ""} ${hasMini ? "has-mini" : ""} ${
+          queueOpen ? "queue-open" : "queue-hidden"
+        }`}
+      >
         <aside className="rail glass">
           <div className="brand">
             <span className="brand-mark" />
@@ -986,6 +1009,17 @@ export default function GlassDemo() {
                       title="退出沉浸（Esc）"
                     >
                       <Minimize2 size={18} />
+                    </button>
+                  )}
+                  {!immersive && (
+                    <button
+                      type="button"
+                      className={`icon-button ${queueOpen ? "is-active-mode" : ""}`}
+                      onClick={() => setQueueOpen((value) => !value)}
+                      aria-label="播放队列"
+                      aria-pressed={queueOpen}
+                    >
+                      <ListMusic size={17} />
                     </button>
                   )}
                   <span className="output-chip">
@@ -1172,7 +1206,7 @@ export default function GlassDemo() {
                     <button
                       type="button"
                       className="icon-button"
-                      onClick={() => (hasQueue ? prevTrack() : selectTrack((index - 1 + TRACKS.length) % TRACKS.length))}
+                      onClick={goPrevious}
                       disabled={!hasQueue && real}
                       aria-label="上一首"
                     >
@@ -1193,7 +1227,7 @@ export default function GlassDemo() {
                     <button
                       type="button"
                       className="icon-button"
-                      onClick={() => (hasQueue ? nextTrack() : selectTrack((index + 1) % TRACKS.length))}
+                      onClick={goNext}
                       disabled={!hasQueue && real}
                       aria-label="下一首"
                     >
@@ -1269,7 +1303,17 @@ export default function GlassDemo() {
             <h2>
               <ListMusic size={16} /> 播放队列
             </h2>
-            <span>{hasQueue ? `${queue.length} 首` : loaded ? "1 首" : `${TRACKS.length} 首`}</span>
+            <div className="queue-head-side">
+              <span>{hasQueue ? `${queue.length} 首` : loaded ? "1 首" : `${TRACKS.length} 首`}</span>
+              <button
+                type="button"
+                className="queue-close"
+                onClick={() => setQueueOpen(false)}
+                aria-label="关闭队列"
+              >
+                <X size={14} />
+              </button>
+            </div>
           </header>
           <ul className="queue-list">
             {hasQueue ? (
@@ -1359,6 +1403,103 @@ export default function GlassDemo() {
             )}
           </footer>
         </aside>
+
+        {hasMini && (
+          <section className="mini-player glass" aria-label="迷你播放条">
+            <button
+              type="button"
+              className="mini-open"
+              onClick={() => setView("now")}
+              aria-label="打开正在播放"
+            >
+              <span className={`mini-cover ${artClass}`}>
+                {heroCover && <img src={heroCover} alt="" />}
+              </span>
+              <span className="mini-meta">
+                <strong>{displayTitle}</strong>
+                <em>{displayArtist}</em>
+              </span>
+            </button>
+
+            <div className="mini-center">
+              <button type="button" className="mini-icon" onClick={goPrevious} aria-label="上一首">
+                <SkipBack size={15} fill="currentColor" />
+              </button>
+              <button
+                type="button"
+                className="mini-play"
+                onClick={togglePlay}
+                aria-label={isPlaying ? "暂停" : "播放"}
+              >
+                {isPlaying ? (
+                  <Pause size={15} fill="currentColor" />
+                ) : (
+                  <Play size={15} fill="currentColor" />
+                )}
+              </button>
+              <button type="button" className="mini-icon" onClick={goNext} aria-label="下一首">
+                <SkipForward size={15} fill="currentColor" />
+              </button>
+              <div className="mini-seek">
+                <input
+                  className="range progress"
+                  type="range"
+                  min={0}
+                  max={duration || 1}
+                  step={0.1}
+                  value={Math.min(time, duration || 1)}
+                  onChange={seek}
+                  onPointerUp={commitSeek}
+                  onKeyUp={commitSeek}
+                  style={{ "--pct": `${progress * 100}%` } as CSSProperties}
+                  aria-label="播放进度"
+                />
+                <div className="mini-times">
+                  <span>{formatTime(time)}</span>
+                  <span>{formatTime(duration)}</span>
+                </div>
+              </div>
+            </div>
+
+            <div className="mini-actions">
+              <button
+                type="button"
+                className="mini-icon"
+                onClick={() => changeVolume(volume > 0 ? 0 : 0.72)}
+                aria-label={volume > 0 ? "静音" : "取消静音"}
+              >
+                {volume > 0 ? <Volume2 size={15} /> : <VolumeX size={15} />}
+              </button>
+              <input
+                className="range is-volume mini-volume"
+                type="range"
+                min={0}
+                max={1}
+                step={0.01}
+                value={volume}
+                onChange={(event) => changeVolume(Number(event.target.value))}
+                style={{ "--pct": `${volume * 100}%` } as CSSProperties}
+                aria-label="音量"
+              />
+              <button
+                type="button"
+                className="mini-icon"
+                onClick={() => setView("lyrics")}
+                aria-label="歌词"
+              >
+                <Mic2 size={16} />
+              </button>
+              <button
+                type="button"
+                className={`mini-icon ${queueOpen ? "is-active-mode" : ""}`}
+                onClick={() => setQueueOpen((value) => !value)}
+                aria-label="播放队列"
+              >
+                <ListMusic size={16} />
+              </button>
+            </div>
+          </section>
+        )}
       </div>
       <ToastHost />
     </div>
