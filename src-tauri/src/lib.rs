@@ -1,9 +1,11 @@
 pub mod audio;
 pub mod library;
 pub mod lyrics;
+mod shortcuts;
+mod smtc;
 
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use audio::{AudioEngine, OutputMode, PlayerSnapshot};
 use serde::Serialize;
@@ -17,6 +19,8 @@ struct AppInfo {
 }
 
 struct EngineState(Mutex<AudioEngine>);
+
+struct SmtcState(Arc<Mutex<Option<smtc::SmtcController>>>);
 
 #[tauri::command]
 fn app_info() -> AppInfo {
@@ -113,16 +117,73 @@ fn player_state(state: State<'_, EngineState>) -> PlayerSnapshot {
         .unwrap_or_default()
 }
 
+#[tauri::command]
+fn smtc_set_metadata(
+    state: State<'_, SmtcState>,
+    title: String,
+    artist: Option<String>,
+    album: Option<String>,
+) {
+    if let Ok(mut guard) = state.0.lock() {
+        if let Some(controller) = guard.as_mut() {
+            controller.set_metadata(
+                &title,
+                artist.as_deref().unwrap_or(""),
+                album.as_deref().unwrap_or(""),
+            );
+        }
+    }
+}
+
+#[tauri::command]
+fn smtc_available(state: State<'_, SmtcState>) -> bool {
+    state
+        .0
+        .lock()
+        .map(|guard| guard.is_some())
+        .unwrap_or(false)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
+            let smtc_slot: Arc<Mutex<Option<smtc::SmtcController>>> =
+                Arc::new(Mutex::new(None));
+            let smtc_for_engine = Arc::clone(&smtc_slot);
             let handle = app.handle().clone();
             let engine = AudioEngine::spawn(move |snapshot| {
+                if let Ok(mut guard) = smtc_for_engine.lock() {
+                    if let Some(controller) = guard.as_mut() {
+                        controller.update_snapshot(&snapshot);
+                    }
+                }
                 let _ = handle.emit("playback://state", snapshot);
             });
             app.manage(EngineState(Mutex::new(engine)));
+            app.manage(SmtcState(Arc::clone(&smtc_slot)));
+
+            if let Some(window) = app.get_webview_window("main") {
+                match window.hwnd() {
+                    Ok(handle_value) => {
+                        let hwnd = windows::Win32::Foundation::HWND(
+                            handle_value.0 as *mut core::ffi::c_void,
+                        );
+                        match smtc::SmtcController::create(app.handle().clone(), hwnd) {
+                            Ok(controller) => {
+                                if let Ok(mut guard) = smtc_slot.lock() {
+                                    *guard = Some(controller);
+                                }
+                            }
+                            Err(error) => eprintln!("smtc: {error}"),
+                        }
+                    }
+                    Err(error) => eprintln!("smtc: 无法获取主窗口句柄: {error}"),
+                }
+            }
+
+            shortcuts::spawn(app.handle().clone());
 
             let data_dir = app
                 .path()
@@ -148,6 +209,8 @@ pub fn run() {
             player_set_speed,
             player_set_output_mode,
             player_state,
+            smtc_set_metadata,
+            smtc_available,
             library::library_import_folder,
             library::library_cancel_scan,
             library::library_scan_status,

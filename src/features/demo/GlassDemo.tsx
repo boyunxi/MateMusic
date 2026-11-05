@@ -40,6 +40,7 @@ import {
 } from "lucide-react";
 import {
   getPlayerState,
+  getSmtcAvailable,
   inTauri,
   loadTrack,
   pauseTrack,
@@ -49,8 +50,10 @@ import {
   setOutputMode,
   setPlaybackSpeed,
   setPlayerNext,
+  setSmtcMetadata,
   setTrackVolume,
   subscribePlayer,
+  subscribeShortcut,
 } from "../../lib/player";
 import type { PlayerSnapshot } from "../../lib/player";
 import { formatHz, formatTime, prettifyCodec } from "../../lib/format";
@@ -265,6 +268,8 @@ export default function GlassDemo() {
   const [queueOpen, setQueueOpen] = useState(() =>
     typeof window === "undefined" ? true : window.innerWidth > 1180,
   );
+  const [smtcReady, setSmtcReady] = useState<boolean | null>(null);
+  const shortcutRef = useRef<(action: string) => void>(() => {});
 
   const view = useAppStore((state) => state.view);
   const setView = useAppStore((state) => state.setView);
@@ -351,6 +356,46 @@ export default function GlassDemo() {
     window.addEventListener("resize", onResize);
     return () => window.removeEventListener("resize", onResize);
   }, []);
+
+  useEffect(() => {
+    if (!inTauri) return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void subscribeShortcut((action) => shortcutRef.current(action))
+      .then((fn) => {
+        if (disposed) fn();
+        else unlisten = fn;
+      })
+      .catch(() => {});
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!inTauri || view !== "settings") return;
+    let cancelled = false;
+    void getSmtcAvailable()
+      .then((available) => {
+        if (!cancelled) setSmtcReady(available);
+      })
+      .catch(() => {
+        if (!cancelled) setSmtcReady(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [view]);
+
+  useEffect(() => {
+    if (!inTauri || !loaded) return;
+    void setSmtcMetadata({
+      title: displayTitle,
+      artist: displayArtist,
+      album: displayAlbum,
+    });
+  }, [loaded?.path, displayTitle, displayArtist, displayAlbum]);
 
   useEffect(() => {
     if (!inTauri) return;
@@ -800,6 +845,41 @@ export default function GlassDemo() {
     else selectTrack((index + 1) % TRACKS.length);
   };
 
+  shortcutRef.current = (action) => {
+    switch (action) {
+      case "toggle":
+        togglePlay();
+        break;
+      case "previous":
+        goPrevious();
+        break;
+      case "next":
+        goNext();
+        break;
+      case "volume-up":
+        changeVolume(Math.min(1, volume + 0.05));
+        break;
+      case "volume-down":
+        changeVolume(Math.max(0, volume - 0.05));
+        break;
+      case "immersive":
+        if (view === "now") setImmersive((value) => !value);
+        else {
+          setView("now");
+          setImmersive(true);
+        }
+        break;
+      case "lyrics":
+        setView("lyrics");
+        break;
+      case "queue":
+        setQueueOpen((value) => !value);
+        break;
+      default:
+        break;
+    }
+  };
+
   useEffect(() => {
     if (!errorText) {
       lastErrorRef.current = "";
@@ -873,7 +953,7 @@ export default function GlassDemo() {
           <div className="rail-spacer" />
 
           <section className="tuning">
-            <p className="tuning-title">演示参数</p>
+            <p className="tuning-title">快速设置</p>
             <div className="segmented" role="group" aria-label="主题">
               <button
                 type="button"
@@ -980,13 +1060,157 @@ export default function GlassDemo() {
               <header className="lyrics-page-head">
                 <div>
                   <p className="eyebrow">设置</p>
-                  <h1>输出与判定</h1>
+                  <h1>播放与外观</h1>
                 </div>
+                <span className="settings-state">
+                  {loaded ? loaded.outputMode : "演示模式"}
+                </span>
               </header>
+
+              <div className="settings-grid">
+                <section className="settings-card">
+                  <h2>外观</h2>
+                  <div className="settings-row">
+                    <span>主题</span>
+                    <div className="segmented settings-segment" role="group" aria-label="主题">
+                      <button
+                        type="button"
+                        className={theme === "dark" ? "is-active" : ""}
+                        onClick={() => setTheme("dark")}
+                        aria-pressed={theme === "dark"}
+                      >
+                        <Moon size={13} /> 深色
+                      </button>
+                      <button
+                        type="button"
+                        className={theme === "light" ? "is-active" : ""}
+                        onClick={() => setTheme("light")}
+                        aria-pressed={theme === "light"}
+                      >
+                        <Sun size={13} /> 浅色
+                      </button>
+                    </div>
+                  </div>
+                  <label className="slider-label">
+                    <span>
+                      玻璃模糊 <em>{blur}px</em>
+                    </span>
+                    <input
+                      className="range is-small"
+                      type="range"
+                      min={0}
+                      max={48}
+                      value={blur}
+                      onChange={(event) => setBlur(Number(event.target.value))}
+                      style={{ "--pct": `${(blur / 48) * 100}%` } as CSSProperties}
+                      aria-label="玻璃模糊强度"
+                    />
+                  </label>
+                </section>
+
+                <section className="settings-card">
+                  <h2>播放</h2>
+                  <div className="settings-row">
+                    <span>输出模式</span>
+                    <div
+                      className="segmented settings-segment"
+                      role="group"
+                      aria-label="输出模式"
+                    >
+                      <button
+                        type="button"
+                        className={outputPreference === "exclusive" ? "is-active" : ""}
+                        onClick={() => changeOutputMode("exclusive")}
+                        aria-pressed={outputPreference === "exclusive"}
+                      >
+                        独占优先
+                      </button>
+                      <button
+                        type="button"
+                        className={outputPreference === "shared" ? "is-active" : ""}
+                        onClick={() => changeOutputMode("shared")}
+                        aria-pressed={outputPreference === "shared"}
+                      >
+                        共享
+                      </button>
+                    </div>
+                  </div>
+                  <div className="settings-row is-stack">
+                    <span>
+                      播放倍速 <em>{speedLabel(speed)}</em>
+                    </span>
+                    <div className="speed-options settings-speed" role="group" aria-label="播放倍速">
+                      {SPEED_OPTIONS.map((value) => (
+                        <button
+                          key={value}
+                          type="button"
+                          className={Math.abs(speed - value) < 0.001 ? "is-active" : ""}
+                          onClick={() => changeSpeed(value)}
+                          aria-pressed={Math.abs(speed - value) < 0.001}
+                        >
+                          {speedLabel(value)}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  <label className="slider-label">
+                    <span>
+                      音量 <em>{Math.round(volume * 100)}%</em>
+                    </span>
+                    <input
+                      className="range is-small"
+                      type="range"
+                      min={0}
+                      max={1}
+                      step={0.01}
+                      value={volume}
+                      onChange={(event) => changeVolume(Number(event.target.value))}
+                      style={{ "--pct": `${volume * 100}%` } as CSSProperties}
+                      aria-label="音量"
+                    />
+                  </label>
+                </section>
+
+                <section className="settings-card">
+                  <h2>系统</h2>
+                  <div className="settings-row">
+                    <span>系统媒体控制</span>
+                    <em className={smtcReady ? "is-good" : "is-muted"}>
+                      {smtcReady == null ? "检测中…" : smtcReady ? "已接入" : "不可用"}
+                    </em>
+                  </div>
+                  <div className="settings-row">
+                    <span>全局快捷键</span>
+                    <em>Ctrl + Alt</em>
+                  </div>
+                  <ul className="shortcut-list">
+                    <li><span>播放 / 暂停</span><kbd>Space</kbd></li>
+                    <li><span>上一首 / 下一首</span><kbd>← / →</kbd></li>
+                    <li><span>音量 - / +</span><kbd>↓ / ↑</kbd></li>
+                    <li><span>沉浸播放</span><kbd>I</kbd></li>
+                    <li><span>歌词页</span><kbd>L</kbd></li>
+                    <li><span>播放队列</span><kbd>Q</kbd></li>
+                  </ul>
+                </section>
+
+                <section className="settings-card">
+                  <h2>曲库</h2>
+                  <p className="settings-card-note">
+                    目录导入、扫描与歌单在曲库页管理；播放队列、曲目与进度会自动保存。
+                  </p>
+                  <button
+                    className="settings-action"
+                    type="button"
+                    onClick={() => setView("library")}
+                  >
+                    <FolderOpen size={14} /> 打开曲库
+                  </button>
+                </section>
+              </div>
+
               <BitPerfectPanel snapshot={loaded} full />
               <p className="settings-note">
-                主题、玻璃模糊、音量、输出模式与倍速会持久化。独占、采样率、位深与 DSP
-                四项都满足时才会标记 Bit-Perfect；共享混音与无法核验的位深不会被标记。
+                独占、采样率、位深与 DSP 四项都满足时才会标记 Bit-Perfect；共享混音与无法核验的位深不会被标记。
               </p>
             </section>
           ) : (

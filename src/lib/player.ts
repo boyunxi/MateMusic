@@ -88,3 +88,11 @@ export const setOutputMode = (mode: "exclusive" | "shared") =>
 export const getPlayerState = () => invoke<PlayerSnapshot>("player_state");
 export const subscribePlayer = (onState: (state: PlayerSnapshot) => void) =>
   listen<PlayerSnapshot>("playback://state", (event) => onState(event.payload));
+export const subscribeShortcut = (onAction: (action: string) => void) =>
+  listen<string>("shortcut://action", (event) => onAction(event.payload));
+export const setSmtcMetadata = (metadata: {
+  title: string;
+  artist: string | null;
+  album: string | null;
+}) => invoke<void>("smtc_set_metadata", metadata);
+export const getSmtcAvailable = () => invoke<boolean>("smtc_available");
