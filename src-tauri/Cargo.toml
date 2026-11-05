@@ -31,6 +31,7 @@ windows = { version = "0.62", features = [
     "Win32_System_Threading",
 ] }
 rubato = "0.15"
+encoding_rs = "0.8.35"
 
 [profile.dev]
 opt-level = 1

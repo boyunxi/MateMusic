@@ -1137,7 +1137,7 @@
 
 .toast-host {
   position: fixed;
-  bottom: 24px;
+  top: 22px;
   left: 50%;
   z-index: 90;
   display: flex;

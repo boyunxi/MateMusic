@@ -61,6 +61,9 @@ import {
 } from "../../lib/library";
 import type { LibraryTrack, ScanStatus } from "../../lib/library";
 import { getPlaybackState, savePlaybackState } from "../../lib/playback";
+import { getLyrics } from "../../lib/lyrics";
+import type { LyricDoc } from "../../lib/lyrics";
+import LyricsPanel from "../lyrics/LyricsPanel";
 import ToastHost from "../../components/ToastHost";
 import LibraryView from "../library/LibraryView";
 import { useAppStore } from "../../store/useAppStore";
@@ -226,6 +229,11 @@ export default function GlassDemo() {
   const shownNotesRef = useRef<Set<string>>(new Set());
   const [restoreReady, setRestoreReady] = useState(!inTauri);
   const [scan, setScan] = useState<ScanStatus | null>(null);
+  const [lyrics, setLyrics] = useState<LyricDoc | null>(null);
+  const [lyricsLoading, setLyricsLoading] = useState(false);
+  const [lyricsError, setLyricsError] = useState<string | null>(null);
+  const [manualLyricOffset, setManualLyricOffset] = useState(0);
+  const lyricOffsetsRef = useRef<Record<string, number>>({});
   const [theme, setTheme] = useState<"dark" | "light">(() =>
     new URLSearchParams(window.location.search).get("theme") === "light" ? "light" : "dark",
   );
@@ -339,6 +347,14 @@ export default function GlassDemo() {
         }
         if (settings.outputMode === "exclusive" || settings.outputMode === "shared") {
           setOutputPreference(settings.outputMode);
+        }
+        for (const [key, value] of Object.entries(settings)) {
+          if (key.startsWith("lyricOffset:")) {
+            const offset = Number(value);
+            if (Number.isFinite(offset)) {
+              lyricOffsetsRef.current[key.slice("lyricOffset:".length)] = offset;
+            }
+          }
         }
         settingsLoaded.current = true;
       })
@@ -467,6 +483,35 @@ export default function GlassDemo() {
   }, [snapshot?.loaded, snapshot?.position]);
 
   useEffect(() => {
+    const path = loaded?.path;
+    if (!path || !inTauri) {
+      setLyrics(null);
+      setLyricsLoading(false);
+      setLyricsError(null);
+      return;
+    }
+    let cancelled = false;
+    setLyricsLoading(true);
+    setLyricsError(null);
+    setManualLyricOffset(lyricOffsetsRef.current[path] ?? 0);
+    void getLyrics(path)
+      .then((document) => {
+        if (cancelled) return;
+        setLyrics(document);
+        setLyricsLoading(false);
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setLyricsError(String(error));
+        setLyricsLoading(false);
+        pushToast({ kind: "error", message: String(error), duration: 6000 });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [loaded?.path, pushToast]);
+
+  useEffect(() => {
     if (!inTauri || !settingsLoaded.current) return;
     void setSetting("theme", theme);
   }, [theme]);
@@ -558,6 +603,22 @@ export default function GlassDemo() {
 
   const commitSeek = () => {
     if (loaded) void seekTrack(Math.max(0, Math.min(time, loaded.duration || time)));
+  };
+
+  const seekTo = (seconds: number) => {
+    const clamped = Math.max(0, duration > 0 ? Math.min(seconds, duration) : seconds);
+    setTime(clamped);
+    if (loaded) void seekTrack(clamped);
+  };
+
+  const changeLyricOffset = (value: number) => {
+    const clamped = Math.max(-10000, Math.min(10000, Math.round(value)));
+    setManualLyricOffset(clamped);
+    const path = loaded?.path;
+    if (path && inTauri) {
+      lyricOffsetsRef.current[path] = clamped;
+      void setSetting(`lyricOffset:${path}`, String(clamped));
+    }
   };
 
   const togglePlay = () => {
@@ -730,10 +791,29 @@ export default function GlassDemo() {
           {view === "library" ? (
             <LibraryView />
           ) : view === "lyrics" ? (
-            <section className="placeholder-view">
-              <p className="eyebrow">歌词</p>
-              <h1>歌词页</h1>
-              <p>歌词解析、双语与逐字高亮将在 M3 接入。当前真实播放不展示模拟歌词。</p>
+            <section className="lyrics-page">
+              <header className="lyrics-page-head">
+                <div>
+                  <p className="eyebrow">歌词</p>
+                  <h1>{loaded ? displayTitle : "歌词"}</h1>
+                </div>
+              </header>
+              {loaded ? (
+                <LyricsPanel
+                  doc={lyrics}
+                  loading={lyricsLoading}
+                  error={lyricsError}
+                  position={time}
+                  offsetMs={manualLyricOffset}
+                  onOffsetChange={changeLyricOffset}
+                  onSeek={seekTo}
+                />
+              ) : (
+                <div className="placeholder-view">
+                  <p>播放本地歌曲后显示歌词</p>
+                  <p>支持同名 LRC / SRT 外置歌词与内嵌歌词；偏移量会按曲目保存。</p>
+                </div>
+              )}
             </section>
           ) : view === "settings" ? (
             <section className="placeholder-view">
@@ -841,10 +921,16 @@ export default function GlassDemo() {
 
               <section className="lyrics" aria-label="歌词">
                 {loaded ? (
-                  <div className="lyric-placeholder">
-                    <p>正在播放本地文件</p>
-                    <p>歌词解析将在 M3 接入，当前不展示模拟歌词</p>
-                  </div>
+                  <LyricsPanel
+                    compact
+                    doc={lyrics}
+                    loading={lyricsLoading}
+                    error={lyricsError}
+                    position={time}
+                    offsetMs={manualLyricOffset}
+                    onOffsetChange={changeLyricOffset}
+                    onSeek={seekTo}
+                  />
                 ) : (
                   <div className="lyric-viewport">
                     <div

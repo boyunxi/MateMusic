@@ -8,6 +8,7 @@ use std::time::Duration;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, SampleFormat, SizedSample, StreamConfig};
 use matemusic_lib::audio::{AudioEngine, OutputMode};
+use matemusic_lib::lyrics;
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::DecoderOptions;
 use symphonia::core::errors::Error as SymphoniaError;
@@ -442,6 +443,35 @@ fn wasapi_check() -> Result<()> {
     Ok(())
 }
 
+fn lyrics_check(path: &Path) -> Result<()> {
+    let document = lyrics::load_lyrics(&path.to_string_lossy(), None)?;
+    match document {
+        Some(document) => {
+            println!(
+                "source={} format={} encoding={} synced={} offset={}ms lines={}",
+                document.source,
+                document.format,
+                document.encoding,
+                document.synced,
+                document.offset_ms,
+                document.lines.len()
+            );
+            for line in document.lines.iter().take(20) {
+                println!(
+                    "start={:?} end={:?} words={} text={:?} translation={:?}",
+                    line.start,
+                    line.end,
+                    line.words.len(),
+                    line.text,
+                    line.translation
+                );
+            }
+        }
+        None => println!("no lyrics found"),
+    }
+    Ok(())
+}
+
 fn recovery_check(path: &Path) -> Result<()> {
     let engine = AudioEngine::spawn(|snapshot| {
         if let Some(err) = snapshot.error {
@@ -571,6 +601,7 @@ fn usage() -> ! {
          \x20 audio_probe engine <file>   # 流式引擎：加载/暂停/seek/恢复自检\n\
          \x20 audio_probe recovery <file> # 输出设备异常：暂停/重开/续播自检\n\
          \x20 audio_probe matrix <dir>    # 格式矩阵：解码与共享输出自检\n\
+         \x20 audio_probe lyrics <file>   # 歌词解析自检\n\
          \x20 audio_probe wasapi          # WASAPI 共享/独占格式能力诊断\n"
     );
     std::process::exit(2);
@@ -596,6 +627,7 @@ fn main() {
         "engine" => engine_check(&path),
         "recovery" => recovery_check(&path),
         "matrix" => matrix_check(&path),
+        "lyrics" => lyrics_check(&path),
         _ => usage(),
     };
 

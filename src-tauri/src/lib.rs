@@ -1,5 +1,6 @@
 pub mod audio;
 pub mod library;
+pub mod lyrics;
 
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -128,7 +129,8 @@ pub fn run() {
             library::playlist_delete,
             library::playlist_add_track,
             library::playlist_remove_track,
-            library::playlist_get_tracks
+            library::playlist_get_tracks,
+            lyrics::lyrics_get
         ])
         .run(tauri::generate_context!())
         .expect("failed to run MateMusic");
