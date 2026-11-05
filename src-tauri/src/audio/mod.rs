@@ -13,6 +13,10 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, SampleFormat, SizedSample, StreamConfig};
 use ringbuf::traits::{Consumer, Observer, Producer, Split};
 use ringbuf::{HeapCons, HeapProd, HeapRb};
+use rubato::{
+    Resampler as RubatoResampler, SincFixedIn, SincInterpolationParameters,
+    SincInterpolationType, WindowFunction,
+};
 use serde::Serialize;
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::{Decoder, DecoderOptions};
@@ -95,6 +99,7 @@ pub(crate) struct Shared {
     pub(crate) volume_bits: AtomicU32,
     pub(crate) underruns: AtomicU64,
     finished: AtomicBool,
+    output_failed: AtomicBool,
 }
 
 impl Shared {
@@ -107,6 +112,7 @@ impl Shared {
             volume_bits: AtomicU32::new(1.0f32.to_bits()),
             underruns: AtomicU64::new(0),
             finished: AtomicBool::new(false),
+            output_failed: AtomicBool::new(false),
         }
     }
 
@@ -123,6 +129,10 @@ impl Shared {
         if let Ok(mut meta) = self.meta.lock() {
             meta.error = Some(message);
         }
+    }
+
+    pub(crate) fn mark_output_failed(&self) {
+        self.output_failed.store(true, Ordering::Relaxed);
     }
 
     fn report_note(&self, message: String) {
@@ -223,6 +233,10 @@ impl AudioEngine {
     pub fn snapshot(&self) -> PlayerSnapshot {
         self.shared.snapshot()
     }
+
+    pub fn simulate_output_failure(&self) {
+        self.shared.output_failed.store(true, Ordering::Relaxed);
+    }
 }
 
 pub fn diagnose_wasapi() -> Vec<String> {
@@ -311,6 +325,206 @@ impl LinearResampler {
     }
 }
 
+const RESAMPLER_CHUNK_FRAMES: usize = 1024;
+
+enum OutputResampler {
+    Identity {
+        src_channels: usize,
+        out_channels: usize,
+    },
+    Sinc {
+        inner: SincFixedIn<f32>,
+        src_channels: usize,
+        out_channels: usize,
+        leftover: Vec<f32>,
+    },
+    Linear(LinearResampler),
+}
+
+impl OutputResampler {
+    fn new(src_rate: u32, src_channels: usize, out_rate: u32, out_channels: usize) -> Self {
+        let src_channels = src_channels.max(1);
+        let out_channels = out_channels.max(1);
+        if src_rate == out_rate {
+            return Self::Identity {
+                src_channels,
+                out_channels,
+            };
+        }
+
+        let params = SincInterpolationParameters {
+            sinc_len: 128,
+            f_cutoff: 0.95,
+            oversampling_factor: 256,
+            interpolation: SincInterpolationType::Linear,
+            window: WindowFunction::BlackmanHarris2,
+        };
+        let ratio = out_rate as f64 / src_rate.max(1) as f64;
+        match SincFixedIn::<f32>::new(ratio, 1.1, params, RESAMPLER_CHUNK_FRAMES, out_channels) {
+            Ok(inner) => Self::Sinc {
+                inner,
+                src_channels,
+                out_channels,
+                leftover: Vec::new(),
+            },
+            Err(error) => {
+                eprintln!("audio resampler: rubato init failed, falling back to linear: {error}");
+                Self::Linear(LinearResampler::new(
+                    src_rate,
+                    src_channels,
+                    out_rate,
+                    out_channels,
+                ))
+            }
+        }
+    }
+
+    fn reset(&mut self) {
+        match self {
+            Self::Identity { .. } => {}
+            Self::Sinc {
+                inner, leftover, ..
+            } => {
+                inner.reset();
+                leftover.clear();
+            }
+            Self::Linear(linear) => linear.reset(),
+        }
+    }
+
+    fn process(&mut self, interleaved: &[f32], out: &mut Vec<f32>) -> Result<(), String> {
+        match self {
+            Self::Identity {
+                src_channels,
+                out_channels,
+            } => {
+                let frames = interleaved.len() / (*src_channels).max(1);
+                for frame_index in 0..frames {
+                    let frame = &interleaved
+                        [frame_index * *src_channels..(frame_index + 1) * *src_channels];
+                    for channel in 0..*out_channels {
+                        out.push(LinearResampler::map_channel(
+                            frame,
+                            *src_channels,
+                            *out_channels,
+                            channel,
+                        ));
+                    }
+                }
+                Ok(())
+            }
+            Self::Sinc {
+                inner,
+                src_channels,
+                out_channels,
+                leftover,
+            } => {
+                leftover.extend_from_slice(interleaved);
+                let chunk_samples = RESAMPLER_CHUNK_FRAMES * *src_channels;
+                while leftover.len() >= chunk_samples {
+                    Self::process_chunk(
+                        inner,
+                        &leftover[..chunk_samples],
+                        *src_channels,
+                        *out_channels,
+                        out,
+                    )?;
+                    leftover.drain(..chunk_samples);
+                }
+                Ok(())
+            }
+            Self::Linear(linear) => {
+                linear.process(interleaved, out);
+                Ok(())
+            }
+        }
+    }
+
+    fn flush(&mut self, out: &mut Vec<f32>) -> Result<(), String> {
+        if let Self::Sinc {
+            inner,
+            src_channels,
+            out_channels,
+            leftover,
+        } = self
+        {
+            if !leftover.is_empty() {
+                let chunk_samples = RESAMPLER_CHUNK_FRAMES * *src_channels;
+                leftover.resize(chunk_samples, 0.0);
+                Self::process_chunk(
+                    inner,
+                    leftover.as_slice(),
+                    *src_channels,
+                    *out_channels,
+                    out,
+                )?;
+                leftover.clear();
+            }
+        }
+        Ok(())
+    }
+
+    fn process_chunk(
+        inner: &mut SincFixedIn<f32>,
+        interleaved: &[f32],
+        src_channels: usize,
+        out_channels: usize,
+        out: &mut Vec<f32>,
+    ) -> Result<(), String> {
+        let mut planar: Vec<Vec<f32>> =
+            vec![vec![0.0f32; RESAMPLER_CHUNK_FRAMES]; out_channels];
+        for frame_index in 0..RESAMPLER_CHUNK_FRAMES {
+            let frame = &interleaved
+                [frame_index * src_channels..(frame_index + 1) * src_channels];
+            for channel in 0..out_channels {
+                planar[channel][frame_index] = LinearResampler::map_channel(
+                    frame,
+                    src_channels,
+                    out_channels,
+                    channel,
+                );
+            }
+        }
+        let waves = inner
+            .process(&planar, None)
+            .map_err(|e| format!("重采样失败: {e}"))?;
+        let frames = waves.first().map(|wave| wave.len()).unwrap_or(0);
+        for frame_index in 0..frames {
+            for channel in 0..out_channels {
+                out.push(
+                    waves
+                        .get(channel)
+                        .and_then(|wave| wave.get(frame_index))
+                        .copied()
+                        .unwrap_or(0.0),
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+fn extension_of(path: &Path) -> String {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.to_ascii_lowercase())
+        .unwrap_or_default()
+}
+
+fn unsupported_message(path: &Path, detail: &str) -> String {
+    match extension_of(path).as_str() {
+        "ape" => "缺少 APE 解码器：首期使用 Symphonia，APE 将在 M3 通过 FFmpeg 支持".to_string(),
+        "wma" => "缺少 WMA 解码器：首期使用 Symphonia，WMA 将在 M3 通过 FFmpeg 支持".to_string(),
+        "opus" => {
+            "缺少 Opus 解码器：Symphonia 首期不支持 Opus，M3 通过 FFmpeg 支持".to_string()
+        }
+        "dsf" | "dff" => {
+            "缺少 DSD 解码器：首期不支持原生 DSD / DSF，M3 将以 PCM 解码".to_string()
+        }
+        _ => format!("无法识别容器格式：{detail}"),
+    }
+}
+
 struct Session {
     format: Box<dyn FormatReader>,
     decoder: Box<dyn Decoder>,
@@ -318,7 +532,7 @@ struct Session {
     src_rate: u32,
     src_channels: usize,
     src_bits: Option<u32>,
-    resampler: LinearResampler,
+    resampler: OutputResampler,
     sample_buf: Option<SampleBuffer<f32>>,
     sample_spec: Option<(u32, usize)>,
     pending: Vec<f32>,
@@ -346,9 +560,9 @@ impl Session {
                 },
                 &MetadataOptions::default(),
             )
-            .map_err(|e| format!("无法识别容器格式: {e}"))?;
+            .map_err(|e| unsupported_message(path, &e.to_string()))?;
 
-        let format = probed.format;
+        let mut format = probed.format;
         let track = format
             .default_track()
             .ok_or_else(|| "文件里没有可播放的默认音轨".to_string())?;
@@ -362,6 +576,45 @@ impl Session {
 
         let sample_rate = params.sample_rate.unwrap_or(0);
         let channels = params.channels.map(|c| c.count()).unwrap_or(0);
+        let mut decoder = symphonia::default::get_codecs()
+            .make(&params, &DecoderOptions::default())
+            .map_err(|e| {
+                if matches!(
+                    extension_of(path).as_str(),
+                    "ape" | "wma" | "opus" | "dsf" | "dff"
+                ) {
+                    unsupported_message(path, &e.to_string())
+                } else {
+                    format!("缺少解码器: {e}")
+                }
+            })?;
+
+        // MP4 等容器在参数里可能没有采样率/声道，先解一个包拿到真实规格再回到开头
+        let (sample_rate, channels) = if sample_rate == 0 || channels == 0 {
+            let mut probed_rate = sample_rate;
+            let mut probed_channels = channels;
+            if let Ok(packet) = format.next_packet() {
+                if packet.track_id() == track_id {
+                    if let Ok(audio_buf) = decoder.decode(&packet) {
+                        let spec = *audio_buf.spec();
+                        probed_rate = spec.rate;
+                        probed_channels = spec.channels.count();
+                    }
+                }
+            }
+            let _ = format.seek(
+                SeekMode::Accurate,
+                SeekTo::Time {
+                    time: Time::new(0, 0.0),
+                    track_id: Some(track_id),
+                },
+            );
+            decoder.reset();
+            (probed_rate, probed_channels)
+        } else {
+            (sample_rate, channels)
+        };
+
         if sample_rate == 0 || channels == 0 {
             return Err("解码结果缺少采样率或声道信息".to_string());
         }
@@ -373,10 +626,6 @@ impl Session {
             }
             _ => 0.0,
         };
-
-        let decoder = symphonia::default::get_codecs()
-            .make(&params, &DecoderOptions::default())
-            .map_err(|e| format!("无法创建解码器: {e}"))?;
 
         let title = path
             .file_stem()
@@ -401,7 +650,7 @@ impl Session {
             src_rate: sample_rate,
             src_channels: channels,
             src_bits: bits,
-            resampler: LinearResampler::new(sample_rate, channels, sample_rate, channels),
+            resampler: OutputResampler::new(sample_rate, channels, sample_rate, channels),
             sample_buf: None,
             sample_spec: None,
             pending: Vec::new(),
@@ -413,7 +662,7 @@ impl Session {
 
     fn configure_output(&mut self, out_rate: u32, out_channels: usize) {
         self.resampler =
-            LinearResampler::new(self.src_rate, self.src_channels, out_rate, out_channels);
+            OutputResampler::new(self.src_rate, self.src_channels, out_rate, out_channels);
         self.pending.clear();
     }
 
@@ -438,6 +687,14 @@ impl Session {
         Ok(())
     }
 
+    fn mark_finished(&mut self) -> Result<(), String> {
+        if !self.finished {
+            self.finished = true;
+            self.resampler.flush(&mut self.pending)?;
+        }
+        Ok(())
+    }
+
     fn decode_next(&mut self) -> Result<(), String> {
         if self.finished {
             return Ok(());
@@ -446,12 +703,10 @@ impl Session {
         let packet = match self.format.next_packet() {
             Ok(packet) => packet,
             Err(SymphoniaError::IoError(e)) if e.kind() == ErrorKind::UnexpectedEof => {
-                self.finished = true;
-                return Ok(());
+                return self.mark_finished();
             }
             Err(SymphoniaError::ResetRequired) => {
-                self.finished = true;
-                return Ok(());
+                return self.mark_finished();
             }
             Err(e) => return Err(format!("读取数据包失败: {e}")),
         };
@@ -481,11 +736,13 @@ impl Session {
                     .as_mut()
                     .expect("sample buffer initialized above");
                 buf.copy_interleaved_ref(audio_buf);
-                self.resampler.process(buf.samples(), &mut self.pending);
+                self.resampler
+                    .process(buf.samples(), &mut self.pending)
+                    .map_err(|e| format!("重采样失败: {e}"))?;
             }
             Err(SymphoniaError::DecodeError(_)) => {}
             Err(SymphoniaError::IoError(e)) if e.kind() == ErrorKind::UnexpectedEof => {
-                self.finished = true;
+                self.mark_finished()?;
             }
             Err(e) => return Err(format!("解码失败: {e}")),
         }
@@ -497,14 +754,13 @@ impl Session {
 fn build_stream<T>(
     device: &cpal::Device,
     config: &StreamConfig,
-    consumer: HeapCons<f32>,
+    consumer: Arc<Mutex<HeapCons<f32>>>,
     shared: Arc<Shared>,
 ) -> Result<cpal::Stream, String>
 where
     T: SizedSample + FromSample<f32>,
 {
     let out_channels = config.channels as usize;
-    let mut consumer = consumer;
     let mut scratch = [0.0f32; 1024];
     let err_shared = Arc::clone(&shared);
 
@@ -520,7 +776,10 @@ where
                 while offset < data.len() {
                     let n = (data.len() - offset).min(scratch.len());
                     let popped = if playing {
-                        consumer.pop_slice(&mut scratch[..n])
+                        match consumer.try_lock() {
+                            Ok(mut guard) => guard.pop_slice(&mut scratch[..n]),
+                            Err(_) => 0,
+                        }
                     } else {
                         0
                     };
@@ -550,6 +809,7 @@ where
             },
             move |err| {
                 err_shared.report_error(format!("共享输出流错误: {err}"));
+                err_shared.mark_output_failed();
             },
             None,
         )
@@ -560,10 +820,24 @@ struct DeviceSetup {
     device: cpal::Device,
     config: StreamConfig,
     sample_format: SampleFormat,
+    name: String,
+}
+
+impl DeviceSetup {
+    fn signature(&self) -> String {
+        format!(
+            "{}|{}|{}|{:?}",
+            self.name,
+            self.config.sample_rate.0,
+            self.config.channels,
+            self.sample_format
+        )
+    }
 }
 
 struct ActiveOutput {
     producer: HeapProd<f32>,
+    consumer: Arc<Mutex<HeapCons<f32>>>,
     mode: OutputMode,
     _backend: Backend,
 }
@@ -573,9 +847,10 @@ enum Backend {
     Exclusive { _handle: ExclusiveHandle },
 }
 
-fn make_ring(rate: u32, channels: usize) -> (HeapProd<f32>, HeapCons<f32>) {
+fn make_ring(rate: u32, channels: usize) -> (HeapProd<f32>, Arc<Mutex<HeapCons<f32>>>) {
     let capacity = (rate as usize * channels.max(1) * RING_SECONDS).max(8192);
-    HeapRb::<f32>::new(capacity).split()
+    let (producer, consumer) = HeapRb::<f32>::new(capacity).split();
+    (producer, Arc::new(Mutex::new(consumer)))
 }
 
 fn sample_format_label(format: SampleFormat) -> &'static str {
@@ -600,7 +875,7 @@ fn create_active_output(
             session.src_rate,
             session.src_channels,
             session.src_bits,
-            consumer,
+            Arc::clone(&consumer),
             Arc::clone(shared),
         ) {
             Ok((handle, negotiated)) => {
@@ -619,6 +894,7 @@ fn create_active_output(
                 );
                 return Ok(ActiveOutput {
                     producer,
+                    consumer,
                     mode: OutputMode::Exclusive,
                     _backend: Backend::Exclusive { _handle: handle },
                 });
@@ -636,21 +912,36 @@ fn create_active_output(
     let (producer, consumer) = make_ring(mix_rate, mix_channels);
 
     let stream = match setup.sample_format {
-        SampleFormat::F32 => {
-            build_stream::<f32>(&setup.device, &setup.config, consumer, Arc::clone(shared))?
-        }
-        SampleFormat::I16 => {
-            build_stream::<i16>(&setup.device, &setup.config, consumer, Arc::clone(shared))?
-        }
-        SampleFormat::U16 => {
-            build_stream::<u16>(&setup.device, &setup.config, consumer, Arc::clone(shared))?
-        }
-        SampleFormat::F64 => {
-            build_stream::<f64>(&setup.device, &setup.config, consumer, Arc::clone(shared))?
-        }
-        SampleFormat::I32 => {
-            build_stream::<i32>(&setup.device, &setup.config, consumer, Arc::clone(shared))?
-        }
+        SampleFormat::F32 => build_stream::<f32>(
+            &setup.device,
+            &setup.config,
+            Arc::clone(&consumer),
+            Arc::clone(shared),
+        )?,
+        SampleFormat::I16 => build_stream::<i16>(
+            &setup.device,
+            &setup.config,
+            Arc::clone(&consumer),
+            Arc::clone(shared),
+        )?,
+        SampleFormat::U16 => build_stream::<u16>(
+            &setup.device,
+            &setup.config,
+            Arc::clone(&consumer),
+            Arc::clone(shared),
+        )?,
+        SampleFormat::F64 => build_stream::<f64>(
+            &setup.device,
+            &setup.config,
+            Arc::clone(&consumer),
+            Arc::clone(shared),
+        )?,
+        SampleFormat::I32 => build_stream::<i32>(
+            &setup.device,
+            &setup.config,
+            Arc::clone(&consumer),
+            Arc::clone(shared),
+        )?,
         other => return Err(format!("暂不支持设备采样格式 {other:?}")),
     };
     stream
@@ -666,8 +957,30 @@ fn create_active_output(
 
     Ok(ActiveOutput {
         producer,
+        consumer,
         mode: OutputMode::Shared,
         _backend: Backend::Shared { _stream: stream },
+    })
+}
+
+fn query_device_setup(shared: &Shared) -> Option<DeviceSetup> {
+    let host = cpal::default_host();
+    let device = host.default_output_device()?;
+    let supported = device.default_output_config().ok()?;
+    let config: StreamConfig = supported.config();
+    let sample_format = supported.sample_format();
+    let name = device.name().unwrap_or_else(|_| "未知设备".to_string());
+    if let Ok(mut meta) = shared.meta.lock() {
+        meta.device = name.clone();
+        meta.output_rate = config.sample_rate.0;
+        meta.output_channels = config.channels as usize;
+        meta.output_format = sample_format_label(sample_format).to_string();
+    }
+    Some(DeviceSetup {
+        device,
+        config,
+        sample_format,
+        name,
     })
 }
 
@@ -675,35 +988,12 @@ fn worker_loop<F>(rx: Receiver<Command>, shared: Arc<Shared>, on_state: F)
 where
     F: Fn(PlayerSnapshot),
 {
-    let host = cpal::default_host();
-    let setup = match host.default_output_device() {
-        Some(device) => match device.default_output_config() {
-            Ok(supported) => {
-                let config: StreamConfig = supported.config();
-                let sample_format = supported.sample_format();
-                let device_name = device.name().unwrap_or_else(|_| "未知设备".to_string());
-                if let Ok(mut meta) = shared.meta.lock() {
-                    meta.device = device_name;
-                    meta.output_rate = config.sample_rate.0;
-                    meta.output_channels = config.channels as usize;
-                    meta.output_format = sample_format_label(sample_format).to_string();
-                }
-                Some(DeviceSetup {
-                    device,
-                    config,
-                    sample_format,
-                })
-            }
-            Err(e) => {
-                shared.report_error(format!("无法获取默认输出格式: {e}"));
-                None
-            }
-        },
-        None => {
-            shared.report_error("系统没有默认输出设备".to_string());
-            None
-        }
-    };
+    let mut setup = query_device_setup(&shared);
+    let mut device_signature = setup
+        .as_ref()
+        .map(DeviceSetup::signature)
+        .unwrap_or_default();
+    let mut last_device_check = Instant::now();
 
     let mut session: Option<Session> = None;
     let mut output: Option<ActiveOutput> = None;
@@ -714,6 +1004,90 @@ where
 
     loop {
         let mut changed = false;
+
+        if last_device_check.elapsed() >= Duration::from_secs(2) {
+            last_device_check = Instant::now();
+            let output_failed = shared.output_failed.swap(false, Ordering::Relaxed);
+            let queried = query_device_setup(&shared);
+            let signature = queried
+                .as_ref()
+                .map(DeviceSetup::signature)
+                .unwrap_or_default();
+            let needs_recovery = output_failed
+                || signature != device_signature
+                || (setup.is_none() && queried.is_some())
+                || (session.is_some() && output.is_none());
+
+            if needs_recovery {
+                let previous_name = setup
+                    .as_ref()
+                    .map(|value| value.name.clone())
+                    .unwrap_or_default();
+                device_signature = signature;
+                setup = queried;
+
+                if let Some(session_ref) = session.as_mut() {
+                    let snap = shared.snapshot();
+                    let was_playing = snap.playing;
+                    let position = snap.position;
+                    shared.playing.store(false, Ordering::Relaxed);
+                    output = None;
+                    exclusive_guard = None;
+
+                    if let Some(device_setup) = setup.as_ref() {
+                        if session_ref.seek(position).is_ok() {
+                            shared.played_samples.store(0, Ordering::Relaxed);
+                            shared.set_base(position);
+                            shared.finished.store(false, Ordering::Relaxed);
+                            let effective = if force_shared {
+                                OutputMode::Shared
+                            } else {
+                                preferred_mode
+                            };
+                            match create_active_output(
+                                effective,
+                                session_ref,
+                                &shared,
+                                device_setup,
+                            ) {
+                                Ok(new_output) => {
+                                    if new_output.mode == OutputMode::Exclusive {
+                                        exclusive_guard =
+                                            Some((Instant::now(), shared.snapshot().position));
+                                    }
+                                    output = Some(new_output);
+                                    shared.playing.store(was_playing, Ordering::Relaxed);
+                                    if !previous_name.is_empty()
+                                        && device_setup.name != previous_name
+                                    {
+                                        let suffix = if was_playing {
+                                            "已自动恢复播放"
+                                        } else {
+                                            "已切换输出设备"
+                                        };
+                                        shared.report_note(format!(
+                                            "输出设备已切换：{}，{suffix}",
+                                            device_setup.name
+                                        ));
+                                    } else if output_failed {
+                                        shared.report_note(format!(
+                                            "输出设备异常，已重新打开：{}",
+                                            device_setup.name
+                                        ));
+                                    }
+                                }
+                                Err(error) => shared
+                                    .report_error(format!("重新打开输出设备失败: {error}")),
+                            }
+                        }
+                    } else {
+                        shared.report_note(
+                            "输出设备已断开，等待重新连接…".to_string(),
+                        );
+                    }
+                }
+            }
+        }
 
         while let Ok(command) = rx.try_recv() {
             changed = true;
@@ -777,6 +1151,12 @@ where
                                 meta.loaded = false;
                                 meta.title.clear();
                                 meta.path.clear();
+                                meta.codec.clear();
+                                meta.sample_rate = 0;
+                                meta.bits = None;
+                                meta.channels = 0;
+                                meta.duration = 0.0;
+                                meta.note = None;
                                 meta.error = Some(e.clone());
                             }
                             shared.report_error(e);
@@ -834,36 +1214,56 @@ where
                 }
                 Command::Pause => shared.playing.store(false, Ordering::Relaxed),
                 Command::Seek(secs) => {
-                    if let (Some(s), Some(device_setup)) = (session.as_mut(), setup.as_ref()) {
+                    if let Some(s) = session.as_mut() {
                         let was_playing = shared.playing.load(Ordering::Relaxed);
                         shared.playing.store(false, Ordering::Relaxed);
+                        // 共享链路原地清空环形缓冲，不重建输出流，避免爆音与卡顿
+                        let keep_shared = output
+                            .as_ref()
+                            .map(|out| out.mode == OutputMode::Shared)
+                            .unwrap_or(false);
+                        if keep_shared {
+                            if let Some(out) = output.as_ref() {
+                                if let Ok(mut consumer) = out.consumer.lock() {
+                                    consumer.clear();
+                                }
+                            }
+                        }
                         match s.seek(secs) {
                             Ok(()) => {
                                 shared.played_samples.store(0, Ordering::Relaxed);
                                 shared.set_base(secs.max(0.0));
                                 shared.finished.store(false, Ordering::Relaxed);
-                                output = None;
                                 exclusive_guard = None;
-                                let effective_mode = if force_shared {
-                                    OutputMode::Shared
-                                } else {
-                                    preferred_mode
-                                };
-                                match create_active_output(
-                                    effective_mode,
-                                    s,
-                                    &shared,
-                                    device_setup,
-                                ) {
-                                    Ok(new_output) => {
-                                        if new_output.mode == OutputMode::Exclusive {
-                                            exclusive_guard =
-                                                Some((Instant::now(), shared.snapshot().position));
+                                if keep_shared {
+                                    shared.playing.store(was_playing, Ordering::Relaxed);
+                                } else if let Some(device_setup) = setup.as_ref() {
+                                    output = None;
+                                    let effective_mode = if force_shared {
+                                        OutputMode::Shared
+                                    } else {
+                                        preferred_mode
+                                    };
+                                    match create_active_output(
+                                        effective_mode,
+                                        s,
+                                        &shared,
+                                        device_setup,
+                                    ) {
+                                        Ok(new_output) => {
+                                            if new_output.mode == OutputMode::Exclusive {
+                                                exclusive_guard = Some((
+                                                    Instant::now(),
+                                                    shared.snapshot().position,
+                                                ));
+                                            }
+                                            output = Some(new_output);
+                                            shared.playing.store(was_playing, Ordering::Relaxed);
                                         }
-                                        output = Some(new_output);
-                                        shared.playing.store(was_playing, Ordering::Relaxed);
+                                        Err(e) => shared.report_error(e),
                                     }
-                                    Err(e) => shared.report_error(e),
+                                } else {
+                                    shared.report_note("输出设备不可用，已暂停播放".to_string());
                                 }
                             }
                             Err(e) => shared.report_error(e),

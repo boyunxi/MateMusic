@@ -1,6 +1,6 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -80,7 +80,7 @@ struct Sink {
 impl Sink {
     unsafe fn run(
         &mut self,
-        consumer: &mut HeapCons<f32>,
+        consumer: &Arc<Mutex<HeapCons<f32>>>,
         shared: &Shared,
         stop: &AtomicBool,
     ) {
@@ -96,6 +96,7 @@ impl Sink {
 
         if let Err(e) = self.client.Start() {
             shared.report_error(format!("无法启动独占输出: {e}"));
+            shared.mark_output_failed();
             return;
         }
 
@@ -124,6 +125,7 @@ impl Sink {
                 Ok(padding) => padding,
                 Err(e) => {
                     shared.report_error(format!("独占输出读取缓冲失败: {e}"));
+                    shared.mark_output_failed();
                     break;
                 }
             };
@@ -135,7 +137,10 @@ impl Sink {
             let samples = available as usize * channels;
             scratch.resize(samples, 0.0);
             let popped = if playing {
-                consumer.pop_slice(&mut scratch[..samples])
+                match consumer.try_lock() {
+                    Ok(mut guard) => guard.pop_slice(&mut scratch[..samples]),
+                    Err(_) => 0,
+                }
             } else {
                 0
             };
@@ -154,11 +159,13 @@ impl Sink {
                     write_samples(ptr, &scratch, self.negotiated.encoding, volume);
                     if let Err(e) = self.render.ReleaseBuffer(available, 0) {
                         shared.report_error(format!("独占输出提交缓冲失败: {e}"));
+                        shared.mark_output_failed();
                         break;
                     }
                 }
                 Err(e) => {
                     shared.report_error(format!("独占输出获取缓冲失败: {e}"));
+                    shared.mark_output_failed();
                     break;
                 }
             }
@@ -391,7 +398,7 @@ fn render_thread(
     rate: u32,
     channels: usize,
     bits: Option<u32>,
-    mut consumer: HeapCons<f32>,
+    consumer: Arc<Mutex<HeapCons<f32>>>,
     shared: Arc<Shared>,
     stop: Arc<AtomicBool>,
     ready: Sender<Result<Negotiated, String>>,
@@ -402,7 +409,7 @@ fn render_thread(
         Ok(mut sink) => {
             let negotiated = sink.negotiated;
             if ready.send(Ok(negotiated)).is_ok() {
-                unsafe { sink.run(&mut consumer, &shared, &stop) };
+                unsafe { sink.run(&consumer, &shared, &stop) };
             }
         }
         Err(e) => {
@@ -419,7 +426,7 @@ pub fn spawn(
     rate: u32,
     channels: usize,
     bits: Option<u32>,
-    consumer: HeapCons<f32>,
+    consumer: Arc<Mutex<HeapCons<f32>>>,
     shared: Arc<Shared>,
 ) -> Result<(ExclusiveHandle, Negotiated), String> {
     let (tx, rx) = mpsc::channel();

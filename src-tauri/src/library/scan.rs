@@ -5,10 +5,12 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use rusqlite::{params, OptionalExtension};
-use symphonia::core::formats::FormatOptions;
+use symphonia::core::codecs::DecoderOptions;
+use symphonia::core::formats::{FormatOptions, SeekMode, SeekTo};
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::{MetadataOptions, StandardTagKey, StandardVisualKey};
 use symphonia::core::probe::Hint;
+use symphonia::core::units::Time;
 use tauri::{AppHandle, Emitter};
 use walkdir::WalkDir;
 
@@ -124,22 +126,53 @@ fn parse_metadata(path: &Path, size: i64) -> Result<Parsed, String> {
         .map_err(|e| format!("无法识别格式: {e}"))?;
 
     let mut format = probed.format;
-    let params = {
+    let (track_id, params) = {
         let track = format
             .default_track()
             .ok_or_else(|| "没有默认音轨".to_string())?;
-        track.codec_params.clone()
+        (track.id, track.codec_params.clone())
     };
 
-    let codec = symphonia::default::get_codecs()
-        .get_codec(params.codec)
-        .map(|desc| desc.short_name.to_string())
-        .unwrap_or_else(|| {
-            path.extension()
-                .and_then(|ext| ext.to_str())
-                .map(|ext| ext.to_ascii_uppercase())
-                .unwrap_or_else(|| "未知".to_string())
-        });
+    let extension = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.to_ascii_lowercase())
+        .unwrap_or_default();
+
+    let codec = if extension == "opus" {
+        "Opus".to_string()
+    } else {
+        symphonia::default::get_codecs()
+            .get_codec(params.codec)
+            .map(|desc| desc.short_name.to_string())
+            .unwrap_or_else(|| extension.to_ascii_uppercase())
+    };
+
+    let mut sample_rate = params.sample_rate;
+    let mut channels = params.channels.map(|value| value.count() as u32);
+    if sample_rate.is_none() || channels.is_none() {
+        if let Ok(mut decoder) =
+            symphonia::default::get_codecs().make(&params, &DecoderOptions::default())
+        {
+            if let Ok(packet) = format.next_packet() {
+                if packet.track_id() == track_id {
+                    if let Ok(audio_buf) = decoder.decode(&packet) {
+                        let spec = *audio_buf.spec();
+                        sample_rate = Some(spec.rate);
+                        channels = Some(spec.channels.count() as u32);
+                    }
+                }
+            }
+            let _ = format.seek(
+                SeekMode::Accurate,
+                SeekTo::Time {
+                    time: Time::new(0, 0.0),
+                    track_id: Some(track_id),
+                },
+            );
+            decoder.reset();
+        }
+    }
 
     let duration = match (params.time_base, params.n_frames) {
         (Some(tb), Some(frames)) => {
@@ -160,9 +193,9 @@ fn parse_metadata(path: &Path, size: i64) -> Result<Parsed, String> {
         genre: None,
         duration,
         codec,
-        sample_rate: params.sample_rate,
+        sample_rate,
         bits: params.bits_per_sample,
-        channels: params.channels.map(|channels| channels.count() as u32),
+        channels,
         bitrate: None,
         cover: None,
     };

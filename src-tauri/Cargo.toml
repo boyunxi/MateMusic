@@ -30,6 +30,7 @@ windows = { version = "0.62", features = [
     "Win32_System_Com",
     "Win32_System_Threading",
 ] }
+rubato = "0.15"
 
 [profile.dev]
 opt-level = 1

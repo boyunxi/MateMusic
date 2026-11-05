@@ -442,6 +442,125 @@ fn wasapi_check() -> Result<()> {
     Ok(())
 }
 
+fn recovery_check(path: &Path) -> Result<()> {
+    let engine = AudioEngine::spawn(|snapshot| {
+        if let Some(err) = snapshot.error {
+            eprintln!("engine state error: {err}");
+        }
+    });
+    engine.set_output_mode(OutputMode::Shared);
+    engine.set_volume(0.25);
+    engine.load(path.to_path_buf());
+    std::thread::sleep(Duration::from_millis(1200));
+
+    let before = engine.snapshot();
+    println!(
+        "before failure: loaded={} playing={} pos={:.3} mode={}",
+        before.loaded, before.playing, before.position, before.output_mode
+    );
+    if !before.loaded || !before.playing {
+        return Err(before.error.unwrap_or_else(|| "加载失败".to_string()));
+    }
+
+    engine.simulate_output_failure();
+    std::thread::sleep(Duration::from_millis(2600));
+    let after = engine.snapshot();
+    println!(
+        "after recovery: loaded={} playing={} pos={:.3} mode={} note={:?}",
+        after.loaded, after.playing, after.position, after.output_mode, after.note
+    );
+
+    if !after.loaded || !after.playing {
+        return Err("输出设备恢复后未继续播放".to_string());
+    }
+    if after.position < before.position + 0.3 {
+        return Err(format!(
+            "恢复后位置未推进: {:.3} -> {:.3}",
+            before.position, after.position
+        ));
+    }
+    if !after.output_mode.contains("共享") {
+        return Err(format!("恢复后输出模式异常: {}", after.output_mode));
+    }
+
+    println!("recovery check OK");
+    Ok(())
+}
+
+fn matrix_check(dir: &Path) -> Result<()> {
+    let engine = AudioEngine::spawn(|snapshot| {
+        if let Some(err) = snapshot.error {
+            eprintln!("engine state error: {err}");
+        }
+    });
+    engine.set_output_mode(OutputMode::Shared);
+
+    let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
+        .map_err(|e| format!("读取目录失败: {e}"))?
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| path.is_file())
+        .collect();
+    files.sort();
+
+    let supported = ["flac", "mp3", "m4a", "ogg", "wav", "aiff", "aif", "alac"];
+    let unsupported = ["ape", "wma", "opus", "dsf", "dff"];
+    let mut failures = 0;
+
+    for path in files {
+        let ext = path
+            .extension()
+            .and_then(|value| value.to_str())
+            .map(|value| value.to_ascii_lowercase())
+            .unwrap_or_default();
+        if !supported.contains(&ext.as_str()) && !unsupported.contains(&ext.as_str()) {
+            continue;
+        }
+
+        engine.load(path.clone());
+        std::thread::sleep(Duration::from_millis(700));
+        let snapshot = engine.snapshot();
+        let ok = if unsupported.contains(&ext.as_str()) {
+            !snapshot.loaded
+                && snapshot
+                    .error
+                    .as_deref()
+                    .map(|error| error.contains("缺少"))
+                    .unwrap_or(false)
+        } else {            snapshot.loaded && snapshot.playing && snapshot.position > 0.05
+        };
+
+        println!(
+            "{:<18} {:<5} codec={:<10} {} Hz/{:?} bit loaded={} playing={} pos={:.2} error={:?} => {}",
+            path.file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("?"),
+            ext,
+            snapshot.codec,
+            snapshot.sample_rate,
+            snapshot.bits,
+            snapshot.loaded,
+            snapshot.playing,
+            snapshot.position,
+            snapshot.error,
+            if ok { "OK" } else { "FAIL" }
+        );
+
+        if !ok {
+            failures += 1;
+        }
+        engine.pause();
+        std::thread::sleep(Duration::from_millis(150));
+    }
+
+    if failures > 0 {
+        Err(format!("{failures} format(s) failed"))
+    } else {
+        println!("format matrix OK");
+        Ok(())
+    }
+}
+
 fn usage() -> ! {
     eprintln!(
         "MateMusic audio probe (M1 spike)\n\
@@ -450,6 +569,8 @@ fn usage() -> ! {
          \x20 audio_probe probe  <file>\n\
          \x20 audio_probe play   <file>\n\
          \x20 audio_probe engine <file>   # 流式引擎：加载/暂停/seek/恢复自检\n\
+         \x20 audio_probe recovery <file> # 输出设备异常：暂停/重开/续播自检\n\
+         \x20 audio_probe matrix <dir>    # 格式矩阵：解码与共享输出自检\n\
          \x20 audio_probe wasapi          # WASAPI 共享/独占格式能力诊断\n"
     );
     std::process::exit(2);
@@ -473,6 +594,8 @@ fn main() {
         "probe" => probe(&path),
         "play" => play(&path),
         "engine" => engine_check(&path),
+        "recovery" => recovery_check(&path),
+        "matrix" => matrix_check(&path),
         _ => usage(),
     };
 

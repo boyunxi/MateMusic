@@ -82,7 +82,7 @@ WebView 的 `<audio>` / Web Audio 会把采样率、格式支持、输出设备�
 | 长列表 | `@tanstack/react-virtual` | 10 万级曲库滚动不卡顿 |
 | 动效 | Motion（Framer Motion） | 页面转场、歌词过渡、封面切换 |
 | 样式 | 原生 CSS Variables + 设计令牌 | 精确控制磨砂玻璃、对比度与减少动效 |
-| 音频解码 | Symphonia（首期，纯 Rust）+ FFmpeg（M3 补齐，LGPL 动态链接） | 首期零 C 依赖、无分发合规负担，覆盖 FLAC / ALAC / MP3 / AAC / WAV / OGG / Opus；APE / WMA / DSD 由 FFmpeg 补齐，统一走 `Decoder` 抽象 |
+| 音频解码 | Symphonia（首期，纯 Rust）+ FFmpeg（M3 补齐，LGPL 动态链接） | 首期覆盖 FLAC / ALAC / MP3 / AAC / WAV / OGG；Opus / WMA / APE / DSD 由 FFmpeg 补齐，统一走 `Decoder` 抽象 |
 | 元数据 | Symphonia 元数据 + 自研兜底 | 标签、封面与播放参数同源解析；后续按格式缺口补充 lofty |
 | 输出 | `cpal` 实现 WASAPI 共享；`windows` crate 直连 WASAPI 独占；ASIO 辅助评估 | 独占模式需要精确控制格式协商与缓冲；共享模式已接入 |
 | 倍速 | FFmpeg `libavfilter` 的 `atempo`（M3 引入） | 与解码同链路，避免额外 DSP 库与许可证冲突；M1 / M2 不暴露倍速入口 |
@@ -137,6 +137,7 @@ WebView 的 `<audio>` / Web Audio 会把采样率、格式支持、输出设备�
 - 播放线程与 UI 线程隔离；UI 只接收高频节流的 `playback://tick` 事件（如 100ms），避免 IPC 洪泛。
 
 > 当前实测：共享模式（cpal / WASAPI）已接入流式引擎与界面；独占模式（`windows` crate，事件驱动 + 源格式协商）已实现，本机 Realtek 驱动只消费一个缓冲即停，引擎在 900ms 无进展时自动回退共享并提示；Bit-Perfect 仍不标记。
+> 播放可靠性：默认设备每 2s 轮询一次，输出流报错或设备签名变化时自动暂停 → 提示 → 重开 → 续播；共享链路 seek 原地清缓冲，不重建输出流；共享链路使用 rubato 正式重采样，同采样率 / 声道保持直通。
 
 ### 3.3 格式覆盖（首期验收矩阵）
 
@@ -151,7 +152,7 @@ WebView 的 `<audio>` / Web Audio 会把采样率、格式支持、输出设备�
 
 不支持项必须返回具体原因（缺少解码器 / 加密 / 文件损坏 / 设备格式不匹配），不得静默失败。
 
-> 当前实测：WAV PCM 16 / 24-bit、44.1 / 96 kHz 解码与共享输出通过；Symphonia 其余格式覆盖在 M1 格式矩阵中逐项验证。
+> 当前实测：WAV / FLAC / MP3 / AAC / ALAC / OGG 可解码与播放；Opus / WMA / APE / DSF 返回明确「缺少解码器」，其中 Opus 也暂列 M3 FFmpeg 补齐范围。
 
 ### 3.4 无缝播放与时钟
 
@@ -315,6 +316,8 @@ MateMusic/
 | FFmpeg 许可证合规 | 分发风险 | 固定 LGPL 构建、动态链接、附带许可证与源码获取说明，禁用 GPL 组件；当前推迟到 M3 引入 |
 | Symphonia 不覆盖 APE / WMA / DSD | 首期格式矩阵存在缺口 | 解码器抽象隔离；补齐前界面提示「缺少解码器」，不静默失败 |
 | 部分声卡驱动独占初始化成功但不推进 | 独占模式无法实际出声 | 900ms 推进校验 + 自动回退共享；界面显示实际模式与原因；在更多设备上复验 |
+| Opus 首期缺解码器 | 格式矩阵存在缺口 | 明确提示「缺少 Opus 解码器」，M3 随 FFmpeg 补齐；不静默失败 |
+| 设备热插拔尚未在真实硬件复验 | 驱动差异可能导致恢复失败 | 已用输出故障注入验证暂停/重开/续播；发布前在 USB DAC 与板载声卡上做拔插测试 |
 | ASIO SDK 授权 | 无法随包分发 | ASIO 做成可选模块，不进入首期硬性验收 |
 | WASAPI 独占被其他程序占用 | 播放启动失败 | 明确错误提示 + 自动/手动回退共享模式 |
 | `atempo` 与歌词 / CUE 时间轴错位 | 倍速下歌词漂移、分轨越界 | 建立输出时间轴到源时间轴的映射表，并用自动化样本校验 |

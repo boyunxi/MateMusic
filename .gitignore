@@ -5,6 +5,7 @@ src-tauri/gen/schemas/
 
 # 确定性生成的测试样本，用 npm run samples 重建
 tests/samples/*.wav
+tests/samples/formats/
 tests/preview-*.png
 
 *.log
