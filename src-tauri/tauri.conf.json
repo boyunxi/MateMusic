@@ -16,8 +16,8 @@
         "title": "MateMusic",
         "width": 1200,
         "height": 800,
-        "minWidth": 940,
-        "minHeight": 600,
+        "minWidth": 960,
+        "minHeight": 640,
         "center": true,
         "theme": "Dark"
       }

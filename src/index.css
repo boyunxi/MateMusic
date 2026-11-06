@@ -1,0 +1,184 @@
+@import "tailwindcss";
+
+@theme inline {
+  --color-accent: var(--mm-accent);
+  --color-accent2: var(--mm-accent2);
+  --font-sans: "Inter", "PingFang SC", "HarmonyOS Sans SC", "Microsoft YaHei UI", "Segoe UI", system-ui, sans-serif;
+}
+
+:root {
+  --mm-accent: #a78bfa;
+  --mm-accent2: #22d3ee;
+  --mm-glass-blur: 40px;
+  --mm-glass-alpha: 0.07;
+  --mm-ambient: 0.85;
+  --mm-lyric-size: 26px;
+  --mm-spring: cubic-bezier(0.22, 1, 0.36, 1);
+  color-scheme: dark;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  width: 100%;
+  margin: 0;
+  overflow: hidden;
+  background: #07060d;
+  color: #f4f4f8;
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+@layer components {
+/* ---------- Tactile Glass tokens ---------- */
+.glass {
+  background: rgba(255, 255, 255, var(--mm-glass-alpha));
+  -webkit-backdrop-filter: blur(var(--mm-glass-blur)) saturate(170%);
+  backdrop-filter: blur(var(--mm-glass-blur)) saturate(170%);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.25), 0 20px 50px rgba(0, 0, 0, 0.4);
+}
+.glass-soft {
+  background: rgba(255, 255, 255, calc(var(--mm-glass-alpha) * 0.7));
+  -webkit-backdrop-filter: blur(calc(var(--mm-glass-blur) * 0.6)) saturate(150%);
+  backdrop-filter: blur(calc(var(--mm-glass-blur) * 0.6)) saturate(150%);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12);
+}
+.glass-strong {
+  background: linear-gradient(160deg, rgba(30, 27, 48, 0.82), rgba(14, 13, 24, 0.9));
+  -webkit-backdrop-filter: blur(calc(var(--mm-glass-blur) + 12px)) saturate(180%);
+  backdrop-filter: blur(calc(var(--mm-glass-blur) + 12px)) saturate(180%);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.22), 0 40px 90px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(0, 0, 0, 0.35);
+}
+
+/* Neumorphic tactile button */
+.neu-btn {
+  background: linear-gradient(145deg, rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0.03));
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.3), 0 8px 20px rgba(0, 0, 0, 0.35), 0 2px 4px rgba(0, 0, 0, 0.3);
+  transition: transform 0.18s var(--mm-spring), box-shadow 0.25s ease, background 0.25s ease;
+}
+.neu-btn:hover {
+  box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.35), 0 10px 26px rgba(0, 0, 0, 0.4), 0 0 24px color-mix(in oklab, var(--mm-accent) 35%, transparent);
+}
+.neu-btn:active {
+  transform: scale(0.95);
+  box-shadow: inset 0 3px 8px rgba(0, 0, 0, 0.45), inset 0 -1px 1px rgba(255, 255, 255, 0.12);
+}
+.neu-primary {
+  background: radial-gradient(120% 120% at 30% 20%, color-mix(in oklab, var(--mm-accent) 100%, white 25%), var(--mm-accent) 45%, color-mix(in oklab, var(--mm-accent) 60%, black) 100%);
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  box-shadow: inset 0 2px 2px rgba(255, 255, 255, 0.45), inset 0 -3px 6px rgba(0, 0, 0, 0.25), 0 10px 28px color-mix(in oklab, var(--mm-accent) 45%, transparent), 0 4px 10px rgba(0, 0, 0, 0.4);
+  transition: transform 0.18s var(--mm-spring), box-shadow 0.25s ease, filter 0.2s ease;
+}
+.neu-primary:hover {
+  filter: brightness(1.08);
+  box-shadow: inset 0 2px 2px rgba(255, 255, 255, 0.5), inset 0 -3px 6px rgba(0, 0, 0, 0.25), 0 14px 36px color-mix(in oklab, var(--mm-accent) 60%, transparent), 0 4px 10px rgba(0, 0, 0, 0.4);
+}
+.neu-primary:active {
+  transform: scale(0.94);
+  box-shadow: inset 0 4px 10px rgba(0, 0, 0, 0.4), 0 4px 14px color-mix(in oklab, var(--mm-accent) 35%, transparent);
+}
+.neu-inset {
+  background: rgba(0, 0, 0, 0.25);
+  box-shadow: inset 0 2px 5px rgba(0, 0, 0, 0.5), inset 0 -1px 0 rgba(255, 255, 255, 0.06);
+}
+
+}
+
+/* ---------- Scrollbars (cross-platform, ultra-thin) ---------- */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
+}
+*::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+*::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.16);
+  border-radius: 999px;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.3);
+}
+.no-scrollbar {
+  scrollbar-width: none;
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+/* ---------- Motion primitives ---------- */
+@keyframes mm-bar {
+  0%, 100% { transform: scaleY(0.25); }
+  50% { transform: scaleY(1); }
+}
+.mm-bars span {
+  transform-origin: bottom;
+  animation: mm-bar 0.9s ease-in-out infinite;
+}
+.mm-bars span:nth-child(2) { animation-duration: 0.7s; animation-delay: -0.2s; }
+.mm-bars span:nth-child(3) { animation-duration: 1.1s; animation-delay: -0.45s; }
+.mm-bars span:nth-child(4) { animation-duration: 0.8s; animation-delay: -0.1s; }
+.mm-bars.paused span { animation-play-state: paused; }
+
+@keyframes mm-spin { to { transform: rotate(360deg); } }
+.mm-spin { animation: mm-spin 18s linear infinite; }
+.mm-spin.paused { animation-play-state: paused; }
+
+@keyframes mm-sheen {
+  0% { transform: translateX(-120%) skewX(-20deg); }
+  60%, 100% { transform: translateX(260%) skewX(-20deg); }
+}
+.mm-sheen::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  width: 40%;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.14), transparent);
+  animation: mm-sheen 6s ease-in-out infinite;
+  pointer-events: none;
+}
+
+@keyframes mm-aurora-a {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  33% { transform: translate(8%, -6%) scale(1.12); }
+  66% { transform: translate(-6%, 5%) scale(0.95); }
+}
+@keyframes mm-aurora-b {
+  0%, 100% { transform: translate(0, 0) scale(1.05); }
+  50% { transform: translate(-10%, 8%) scale(0.9); }
+}
+.mm-aurora-a { animation: mm-aurora-a 22s ease-in-out infinite; }
+.mm-aurora-b { animation: mm-aurora-b 28s ease-in-out infinite; }
+.mm-aurora-c { animation: mm-aurora-a 34s ease-in-out infinite reverse; }
+
+.reduce-motion .mm-aurora-a,
+.reduce-motion .mm-aurora-b,
+.reduce-motion .mm-aurora-c,
+.reduce-motion .mm-sheen::after {
+  animation: none !important;
+}
+
+.vinyl-grooves {
+  background:
+    radial-gradient(circle at 50% 50%, transparent 0 31%, rgba(0, 0, 0, 0) 31%),
+    repeating-radial-gradient(circle at 50% 50%, #0b0b10 0px, #0b0b10 2px, #17161f 3px, #0b0b10 4px),
+    #0b0b10;
+}
+
+input[type="range"].mm-vertical {
+  writing-mode: vertical-lr;
+  direction: rtl;
+}
+
+kbd {
+  font-family: ui-monospace, "SF Mono", "Cascadia Code", Consolas, monospace;
+}
