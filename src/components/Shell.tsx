@@ -9,8 +9,7 @@ import { PRESET_TRACKS } from "../data/presets";
 import { cn } from "../utils/cn";
 import { Kbd, SPRING } from "./ui";
 import type { NavKey } from "../types";
-
-export const openFilePicker = () => document.getElementById("mm-file-input")?.click();
+import { appWindow, inTauri } from "../lib/tauri";
 
 /* ---------------- Ambient background ---------------- */
 export function AmbientBackground() {
@@ -70,6 +69,12 @@ export function TitleBar() {
   const a = useActions();
   const inputRef = useRef<HTMLInputElement>(null);
   const [fullscreen, setFullscreen] = useState(false);
+  const [maximized, setMaximized] = useState(false);
+
+  useEffect(() => {
+    if (!inTauri) return;
+    void appWindow.isMaximized().then(setMaximized).catch(() => {});
+  }, []);
 
   useEffect(() => {
     const h = () => setFullscreen(!!document.fullscreenElement);
@@ -89,6 +94,10 @@ export function TitleBar() {
   }, []);
 
   const toggleFullscreen = () => {
+    if (inTauri) {
+      void appWindow.toggleMaximize().then(() => appWindow.isMaximized().then(setMaximized)).catch(() => {});
+      return;
+    }
     if (document.fullscreenElement) void document.exitFullscreen();
     else void document.documentElement.requestFullscreen?.().catch(() => a.toast("当前环境不支持最大化", "error"));
   };
@@ -96,8 +105,8 @@ export function TitleBar() {
   const winBtn = "grid h-8 w-10 shrink-0 place-items-center rounded-lg text-white/60 transition-all hover:bg-white/10 hover:text-white active:scale-95";
 
   return (
-    <header className="relative z-20 flex h-14 shrink-0 items-center gap-4 px-4">
-      <div className="flex w-[220px] min-w-0 shrink-0 items-center gap-2.5">
+    <header data-tauri-drag-region className="relative z-20 flex h-14 shrink-0 items-center gap-4 px-4">
+      <div data-tauri-drag-region className="flex w-[220px] min-w-0 shrink-0 items-center gap-2.5">
         <Logo />
         <div className="flex min-w-0 flex-col leading-tight">
           <span className="truncate text-[15px] font-semibold tracking-tight">MateMusic</span>
@@ -131,7 +140,7 @@ export function TitleBar() {
 
       <div className="flex shrink-0 items-center gap-1">
         <button
-          onClick={openFilePicker}
+          onClick={() => void a.pickFiles()}
           className="neu-btn mr-1 flex h-9 shrink-0 items-center gap-2 whitespace-nowrap rounded-full px-3.5 text-[12.5px] font-medium text-white/85"
         >
           <Upload className="h-4 w-4 shrink-0" />
@@ -144,8 +153,8 @@ export function TitleBar() {
         <button title="最小化（迷你模式）" onClick={() => a.setWindowMode("mini")} className={winBtn}>
           <Minus className="h-4 w-4" />
         </button>
-        <button title={fullscreen ? "还原" : "最大化"} onClick={toggleFullscreen} className={winBtn}>
-          {fullscreen ? <Copy className="h-3.5 w-3.5" /> : <Square className="h-3.5 w-3.5" />}
+        <button title={fullscreen || maximized ? "还原" : "最大化"} onClick={toggleFullscreen} className={winBtn}>
+          {fullscreen || maximized ? <Copy className="h-3.5 w-3.5" /> : <Square className="h-3.5 w-3.5" />}
         </button>
         <button
           title="关闭"

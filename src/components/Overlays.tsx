@@ -7,6 +7,7 @@ import { Cover, IconButton, SPRING } from "./ui";
 import { ProgressRow, TransportControls } from "./Dock";
 import { LikeButton } from "./TrackTable";
 import { AmbientBackground, Logo } from "./Shell";
+import { inTauri, onNativeDrop } from "../lib/tauri";
 
 export function Toasts() {
   const { toasts } = usePlayer();
@@ -66,6 +67,26 @@ export function useDropImport() {
   const [over, setOver] = useState(false);
   const depth = useRef(0);
   useEffect(() => {
+    if (inTauri) {
+      let alive = true;
+      let unlisten: (() => void) | undefined;
+      void onNativeDrop((event) => {
+        if (!alive) return;
+        if (event.type === "enter" || event.type === "over") setOver(true);
+        else if (event.type === "leave") setOver(false);
+        else if (event.type === "drop") {
+          setOver(false);
+          if (event.paths.length) void a.importPaths(event.paths);
+        }
+      }).then((fn) => {
+        if (alive) unlisten = fn;
+        else fn();
+      });
+      return () => {
+        alive = false;
+        unlisten?.();
+      };
+    }
     const hasFiles = (e: DragEvent) => Array.from(e.dataTransfer?.types || []).includes("Files");
     const enter = (e: DragEvent) => {
       if (!hasFiles(e)) return;

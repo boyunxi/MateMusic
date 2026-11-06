@@ -330,7 +330,7 @@ struct TrackRecord {
     cue_path: Option<String>,
     cue_start: Option<f64>,
     cue_end: Option<f64>,
-    folder_id: i64,
+    folder_id: Option<i64>,
     title: String,
     artist: Option<String>,
     album: Option<String>,
@@ -584,7 +584,7 @@ fn run_inner(
                     cue_path: Some(cue_info.cue_path.clone()),
                     cue_start: Some(track.start),
                     cue_end: track.end,
-                    folder_id,
+                    folder_id: Some(folder_id),
                     title: track.title.clone(),
                     artist: track
                         .performer
@@ -638,7 +638,7 @@ fn run_inner(
                     cue_path: None,
                     cue_start: None,
                     cue_end: None,
-                    folder_id,
+                    folder_id: Some(folder_id),
                     title: parsed.title,
                     artist: parsed.artist,
                     album: parsed.album,
@@ -696,6 +696,125 @@ fn run_inner(
     update_status(status, scanned, imported, skipped, errors, "");
     Ok(())
 }
+/// Imports an explicit list of audio files (native file dialog / drag & drop).
+pub fn import_files(
+    app: AppHandle,
+    db_path: PathBuf,
+    covers_dir: PathBuf,
+    paths: Vec<PathBuf>,
+    status: Arc<Mutex<ScanStatus>>,
+    cancel: Arc<AtomicBool>,
+) {
+    if let Err(error) = import_files_inner(
+        &app,
+        &db_path,
+        &covers_dir,
+        &paths,
+        &status,
+        &cancel,
+    ) {
+        eprintln!("import files failed: {error}");
+        if let Ok(mut status) = status.lock() {
+            status.errors += 1;
+            status.current = error;
+        }
+    }
+    if let Ok(mut status) = status.lock() {
+        status.scanning = false;
+        status.current.clear();
+    }
+    emit_progress(&app, &status);
+    let _ = app.emit("library://changed", ());
+}
+
+fn import_files_inner(
+    app: &AppHandle,
+    db_path: &Path,
+    covers_dir: &Path,
+    paths: &[PathBuf],
+    status: &Arc<Mutex<ScanStatus>>,
+    cancel: &AtomicBool,
+) -> Result<(), String> {
+    let conn = db::open(db_path).map_err(|e| format!("打开数据库失败: {e}"))?;
+    let mut scanned = 0u64;
+    let mut imported = 0u64;
+    let mut skipped = 0u64;
+    let mut errors = 0u64;
+    let mut last_emit = Instant::now() - Duration::from_secs(1);
+
+    for path in paths {
+        if cancel.load(Ordering::Relaxed) {
+            break;
+        }
+        if !path.is_file() || !is_audio(path) {
+            continue;
+        }
+        scanned += 1;
+        let path_str = path_string(path);
+        let key = normalized_key(path);
+        let size = fs::metadata(path).map(|meta| meta.len() as i64).unwrap_or(0);
+        let mtime = mtime_secs(path);
+
+        if track_exists(&conn, &key, size, mtime).unwrap_or(false) {
+            skipped += 1;
+        } else {
+            let parsed = match parse_metadata(path, size) {
+                Ok(parsed) => parsed,
+                Err(error) => {
+                    errors += 1;
+                    eprintln!("metadata error {}: {error}", path.display());
+                    fallback(path, size)
+                }
+            };
+            let cover_path = parsed
+                .cover
+                .as_ref()
+                .and_then(|(data, media_type)| save_cover(covers_dir, path, data, media_type));
+            let record = TrackRecord {
+                source_key: key,
+                path: path_str.clone(),
+                cue_path: None,
+                cue_start: None,
+                cue_end: None,
+                folder_id: None,
+                title: parsed.title,
+                artist: parsed.artist,
+                album: parsed.album,
+                album_artist: parsed.album_artist,
+                track_no: parsed.track_no,
+                disc_no: parsed.disc_no,
+                year: parsed.year,
+                genre: parsed.genre,
+                duration: parsed.duration,
+                codec: parsed.codec,
+                sample_rate: parsed.sample_rate,
+                bits: parsed.bits,
+                channels: parsed.channels,
+                bitrate: parsed.bitrate,
+                size,
+                mtime,
+                cover_path,
+            };
+            match upsert_track(&conn, &record) {
+                Ok(()) => imported += 1,
+                Err(error) => {
+                    errors += 1;
+                    eprintln!("import error {}: {error}", path.display());
+                }
+            }
+        }
+
+        update_status(status, scanned, imported, skipped, errors, &path_str);
+        if last_emit.elapsed() >= Duration::from_millis(200) {
+            emit_progress(app, status);
+            last_emit = Instant::now();
+        }
+    }
+
+    update_status(status, scanned, imported, skipped, errors, "");
+    Ok(())
+}
+
 fn emit_progress(app: &AppHandle, status: &Arc<Mutex<ScanStatus>>) {
     if let Ok(status) = status.lock() {
         let _ = app.emit("scan://progress", status.clone());

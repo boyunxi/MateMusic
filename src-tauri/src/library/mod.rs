@@ -12,7 +12,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::Serialize;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Emitter, State};
 
 pub(crate) fn now_secs() -> i64 {
     SystemTime::now()
@@ -309,6 +309,102 @@ pub fn library_import_folder(
         join: Some(join),
     });
 
+    Ok(())
+}
+
+#[tauri::command]
+pub fn library_import_files(
+    app: AppHandle,
+    state: State<'_, LibraryState>,
+    paths: Vec<String>,
+) -> Result<(), String> {
+    let files: Vec<PathBuf> = paths
+        .into_iter()
+        .map(PathBuf::from)
+        .filter(|path| path.is_file())
+        .collect();
+    if files.is_empty() {
+        return Err("没有可导入的音频文件".to_string());
+    }
+
+    let previous = state
+        .scan
+        .lock()
+        .map_err(|_| "扫描状态锁失败".to_string())?
+        .take();
+    if let Some(job) = previous {
+        job.cancel.store(true, Ordering::Relaxed);
+        if let Some(join) = job.join {
+            let _ = join.join();
+        }
+    }
+
+    {
+        let mut status = state
+            .status
+            .lock()
+            .map_err(|_| "扫描状态锁失败".to_string())?;
+        *status = ScanStatus {
+            scanning: true,
+            folder: format!("{} 个文件", files.len()),
+            ..Default::default()
+        };
+    }
+
+    let cancel = Arc::new(AtomicBool::new(false));
+    let status = Arc::clone(&state.status);
+    let cancel_thread = Arc::clone(&cancel);
+    let db_path = state.db_path.clone();
+    let covers_dir = state.covers_dir.clone();
+    let app_handle = app.clone();
+    let join = thread::Builder::new()
+        .name("matemusic-import".to_string())
+        .spawn(move || {
+            scan::import_files(
+                app_handle,
+                db_path,
+                covers_dir,
+                files,
+                status,
+                cancel_thread,
+            );
+        })
+        .map_err(|e| format!("无法启动导入线程: {e}"))?;
+
+    *state
+        .scan
+        .lock()
+        .map_err(|_| "扫描状态锁失败".to_string())? = Some(ScanJob {
+        cancel,
+        join: Some(join),
+    });
+
+    Ok(())
+}
+
+#[tauri::command]
+pub fn library_remove_tracks(
+    app: AppHandle,
+    state: State<'_, LibraryState>,
+    ids: Vec<i64>,
+) -> Result<(), String> {
+    let conn = state.conn()?;
+    for id in ids {
+        conn.execute("DELETE FROM tracks WHERE id = ?1", params![id])
+            .map_err(|e| format!("移除曲目失败: {e}"))?;
+    }
+    let _ = app.emit("library://changed", ());
+    Ok(())
+}
+
+#[tauri::command]
+pub fn library_clear(app: AppHandle, state: State<'_, LibraryState>) -> Result<(), String> {
+    let conn = state.conn()?;
+    conn.execute("DELETE FROM tracks", [])
+        .map_err(|e| format!("清空曲库失败: {e}"))?;
+    conn.execute("DELETE FROM folders", [])
+        .map_err(|e| format!("清空目录失败: {e}"))?;
+    let _ = app.emit("library://changed", ());
     Ok(())
 }
 

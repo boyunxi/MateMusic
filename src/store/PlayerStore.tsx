@@ -5,6 +5,18 @@ import { getEngine } from "../lib/audioEngine";
 import { db, type StoredTrack } from "../lib/db";
 import { parseFileName, parseMetadata, probeDuration } from "../lib/metadata";
 import { extractPalette, generatedCover, hashString, paletteFromSeed } from "../lib/utils";
+import { inTauri, pickAudioFiles, pickMusicFolder } from "../lib/tauri";
+import { nativePlayer, type NativeSnapshot, type OutputMode } from "../lib/nativePlayer";
+import {
+  clearLibrary,
+  fetchLibraryTracks,
+  importLibraryFiles,
+  importLibraryFolder,
+  loadTrackLyrics,
+  removeLibraryTracks,
+  subscribeLibraryChanged,
+  subscribeScan,
+} from "../lib/nativeLibrary";
 
 /* ------------------------------------------------------------------ */
 /*  Defaults                                                           */
@@ -17,6 +29,7 @@ export const DEFAULT_SETTINGS: Settings = {
   closeBehavior: "sleep",
   doubleClickAction: "play",
   outputDeviceId: "",
+  outputMode: "shared",
   normalize: false,
   preservePitch: true,
   fade: true,
@@ -77,12 +90,15 @@ export interface PlayerState {
   settings: Settings;
   toasts: Toast[];
   importing: { total: number; done: number } | null;
+  nativeActive: boolean;
+  native: NativeSnapshot | null;
 }
 
 type Action =
   | { type: "PATCH"; patch: Partial<PlayerState> }
   | { type: "SETTINGS"; patch: Partial<Settings> }
   | { type: "ADD_TRACKS"; tracks: Track[] }
+  | { type: "SYNC_LIBRARY"; tracks: Track[] }
   | { type: "REMOVE_TRACKS"; ids: string[] }
   | { type: "UPDATE_TRACK"; id: string; patch: Partial<Track> }
   | { type: "PLAY_START"; id: string }
@@ -104,6 +120,19 @@ function reducer(s: PlayerState, a: Action): PlayerState {
       const exist = new Set(s.tracks.map((t) => t.id));
       const fresh = a.tracks.filter((t) => !exist.has(t.id));
       return { ...s, tracks: [...s.tracks, ...fresh] };
+    }
+    case "SYNC_LIBRARY": {
+      const keep = s.tracks.filter((t) => !t.id.startsWith("lib-"));
+      const tracks = [...keep, ...a.tracks];
+      const ids = new Set(tracks.map((t) => t.id));
+      return {
+        ...s,
+        tracks,
+        queue: s.queue.filter((id) => ids.has(id)),
+        liked: s.liked.filter((id) => ids.has(id)),
+        recent: s.recent.filter((id) => ids.has(id)),
+        currentId: s.currentId && !ids.has(s.currentId) ? null : s.currentId,
+      };
     }
     case "REMOVE_TRACKS": {
       const del = new Set(a.ids);
@@ -183,6 +212,8 @@ function initState(): PlayerState {
     settings: p.settings ?? DEFAULT_SETTINGS,
     toasts: [],
     importing: null,
+    nativeActive: false,
+    native: null,
   };
 }
 
@@ -248,17 +279,41 @@ function useBuildActions(dispatch: React.Dispatch<Action>, stateRef: React.Mutab
       const t = find(id);
       if (!t) return;
       dispatch({ type: "PLAY_START", id });
-      engine.load(t.src, { autoplay, startAt });
+      if (inTauri && t.path) {
+        engine.stop();
+        dispatch({ type: "PATCH", patch: { nativeActive: true } });
+        void nativePlayer
+          .load(t.path, { autoplay, startAt, cueStart: t.cueStart, cueEnd: t.cueEnd })
+          .catch((error) => toast(String(error), "error"));
+        if (!t.lrc) {
+          void loadTrackLyrics(t.path).then((lrc) => {
+            if (lrc) dispatch({ type: "UPDATE_TRACK", id: t.id, patch: { lrc } });
+          });
+        }
+      } else {
+        if (stateRef.current.nativeActive) void nativePlayer.pause();
+        dispatch({ type: "PATCH", patch: { nativeActive: false } });
+        engine.load(t.src, { autoplay, startAt });
+      }
     };
+
+    const isLoaded = () =>
+      stateRef.current.nativeActive
+        ? !!nativePlayer.snapshot?.loaded
+        : !!engine.element.getAttribute("src");
 
     const playTrack = (id: string, context?: string[]) => {
       if (context && context.length) dispatch({ type: "QUEUE_SET", ids: context });
       else if (!S().queue.includes(id)) dispatch({ type: "QUEUE_NEXT", id });
       const cur = S().currentId;
       if (cur && cur !== id) history.current.push(cur);
-      if (cur === id && engine.element.getAttribute("src")) {
-        engine.seek(0);
-        void engine.play();
+      if (cur === id && isLoaded()) {
+        if (S().nativeActive) {
+          void nativePlayer.seek(0).then(() => nativePlayer.play());
+        } else {
+          engine.seek(0);
+          void engine.play();
+        }
         return;
       }
       startTrack(id);
@@ -274,8 +329,12 @@ function useBuildActions(dispatch: React.Dispatch<Action>, stateRef: React.Mutab
       const list = validQueue();
       if (!list.length) return;
       if (auto && s.loopMode === "one" && s.currentId) {
-        engine.seek(0);
-        void engine.play();
+        if (s.nativeActive) {
+          void nativePlayer.seek(0).then(() => nativePlayer.play());
+        } else {
+          engine.seek(0);
+          void engine.play();
+        }
         return;
       }
       let nextId: string;
@@ -293,8 +352,10 @@ function useBuildActions(dispatch: React.Dispatch<Action>, stateRef: React.Mutab
 
     const prev = () => {
       const s = S();
-      if (engine.currentTime > 3) {
-        engine.seek(0);
+      const time = s.nativeActive ? nativePlayer.currentTime : engine.currentTime;
+      if (time > 3) {
+        if (s.nativeActive) void nativePlayer.seek(0);
+        else engine.seek(0);
         return;
       }
       const list = validQueue();
@@ -315,9 +376,14 @@ function useBuildActions(dispatch: React.Dispatch<Action>, stateRef: React.Mutab
 
     const togglePlay = () => {
       const s = S();
-      if (!s.currentId || !engine.element.getAttribute("src")) {
+      if (!s.currentId || !isLoaded()) {
         const id = s.currentId && find(s.currentId) ? s.currentId : validQueue()[0] || s.tracks[0]?.id;
         if (id) startTrack(id);
+        return;
+      }
+      if (s.nativeActive) {
+        if (s.isPlaying) void nativePlayer.pause();
+        else void nativePlayer.play();
         return;
       }
       engine.toggle();
@@ -408,13 +474,25 @@ function useBuildActions(dispatch: React.Dispatch<Action>, stateRef: React.Mutab
 
     const removeTracks = (ids: string[]) => {
       const s = S();
-      const locals = ids.filter((id) => find(id)?.source === "local");
+      const targets = ids.map((id) => find(id)).filter((t): t is Track => !!t);
+      const nativeIds = targets.filter((t) => t.libraryId).map((t) => t.libraryId!);
+      const locals = targets.filter((t) => t.source === "local").map((t) => t.id);
       if (!locals.length) return;
-      if (s.currentId && locals.includes(s.currentId)) engine.stop();
+      if (nativeIds.length && inTauri) {
+        void removeLibraryTracks(nativeIds).catch((error) => toast(String(error), "error"));
+      }
+      if (s.currentId && locals.includes(s.currentId)) {
+        if (s.nativeActive) {
+          void nativePlayer.pause();
+          dispatch({ type: "PATCH", patch: { nativeActive: false } });
+        } else {
+          engine.stop();
+        }
+      }
       for (const id of locals) {
         const t = find(id);
         if (t) {
-          URL.revokeObjectURL(t.src);
+          if (t.src.startsWith("blob:")) URL.revokeObjectURL(t.src);
           if (t.cover.startsWith("blob:")) URL.revokeObjectURL(t.cover);
         }
         void db.remove(id);
@@ -423,17 +501,92 @@ function useBuildActions(dispatch: React.Dispatch<Action>, stateRef: React.Mutab
       toast(`已从曲库移除 ${locals.length} 首本地歌曲`, "info");
     };
 
+    const refreshLibrary = async (): Promise<Track[]> => {
+      if (!inTauri) return [];
+      try {
+        const locals = await fetchLibraryTracks();
+        dispatch({ type: "SYNC_LIBRARY", tracks: locals });
+        dispatch({ type: "PATCH", patch: { localLoaded: true } });
+        return locals;
+      } catch (error) {
+        toast(`读取曲库失败：${String(error)}`, "error");
+        return [];
+      }
+    };
+
+    const importPaths = async (paths: string[]) => {
+      if (!inTauri || !paths.length) return;
+      dispatch({ type: "PATCH", patch: { importing: { total: paths.length, done: 0 } } });
+      try {
+        await importLibraryFiles(paths);
+        toast(`正在导入 ${paths.length} 个文件…`);
+      } catch (error) {
+        dispatch({ type: "PATCH", patch: { importing: null } });
+        toast(String(error), "error");
+      }
+    };
+
+    const pickFiles = async () => {
+      if (!inTauri) {
+        document.getElementById("mm-file-input")?.click();
+        return;
+      }
+      try {
+        const paths = await pickAudioFiles();
+        if (paths.length) await importPaths(paths);
+      } catch (error) {
+        toast(String(error), "error");
+      }
+    };
+
+    const pickFolder = async () => {
+      if (!inTauri) {
+        toast("浏览器模式请直接选择音频文件", "error");
+        return;
+      }
+      try {
+        const path = await pickMusicFolder();
+        if (!path) return;
+        dispatch({ type: "PATCH", patch: { importing: { total: 1, done: 0 } } });
+        await importLibraryFolder(path);
+        toast("正在扫描音乐文件夹…");
+      } catch (error) {
+        dispatch({ type: "PATCH", patch: { importing: null } });
+        toast(String(error), "error");
+      }
+    };
+
     return {
       toast,
       playTrack,
       togglePlay,
       next,
       prev,
-      seek: (t: number) => engine.seek(t),
-      seekBy: (d: number) => engine.seek(engine.currentTime + d),
+      seek: (t: number) => {
+        if (S().nativeActive) void nativePlayer.seek(t);
+        else engine.seek(t);
+      },
+      seekBy: (d: number) => {
+        const base = S().nativeActive ? nativePlayer.currentTime : engine.currentTime;
+        const t = Math.max(0, base + d);
+        if (S().nativeActive) void nativePlayer.seek(t);
+        else engine.seek(t);
+      },
       setVolume: (v: number) => dispatch({ type: "PATCH", patch: { volume: Math.max(0, Math.min(1, v)), muted: false } }),
+      nudgeVolume: (d: number) => {
+        const v = Math.max(0, Math.min(1, S().volume + d));
+        dispatch({ type: "PATCH", patch: { volume: v, muted: false } });
+      },
       toggleMute: () => dispatch({ type: "PATCH", patch: { muted: !S().muted } }),
       setRate: (rate: number) => dispatch({ type: "PATCH", patch: { rate } }),
+      setOutputMode: (mode: OutputMode) => {
+        dispatch({ type: "SETTINGS", patch: { outputMode: mode } });
+        if (!inTauri) return;
+        void nativePlayer
+          .setOutputMode(mode)
+          .then(() => toast(mode === "exclusive" ? "已切换独占输出" : mode === "asio" ? "已切换 ASIO 输出" : "已切换共享输出", "success"))
+          .catch((error) => toast(String(error), "error"));
+      },
       setLoop: (loopMode: LoopMode) => dispatch({ type: "PATCH", patch: { loopMode } }),
       cycleLoop: () => {
         const order: LoopMode[] = ["list", "one", "shuffle"];
@@ -463,12 +616,28 @@ function useBuildActions(dispatch: React.Dispatch<Action>, stateRef: React.Mutab
         toast("已清空播放队列");
       },
       importFiles,
+      importPaths,
+      pickFiles,
+      pickFolder,
+      refreshLibrary,
       setLyrics,
       removeTracks,
       clearLocal: async () => {
         const ids = S().tracks.filter((t) => t.source === "local").map((t) => t.id);
-        if (ids.length) removeTracks(ids);
+        if (S().nativeActive) {
+          void nativePlayer.pause();
+          dispatch({ type: "PATCH", patch: { nativeActive: false } });
+        }
+        if (inTauri) {
+          try {
+            await clearLibrary();
+          } catch (error) {
+            toast(String(error), "error");
+          }
+        }
         await db.clear();
+        if (ids.length) dispatch({ type: "REMOVE_TRACKS", ids });
+        toast("已清空本地曲库", "info");
       },
       clearRecent: () => {
         dispatch({ type: "PATCH", patch: { recent: [] } });
@@ -478,6 +647,7 @@ function useBuildActions(dispatch: React.Dispatch<Action>, stateRef: React.Mutab
       openPlaylist: (id: string | null) => dispatch({ type: "PATCH", patch: { nav: "playlists", activePlaylist: id } }),
       toggleSidebar: () => dispatch({ type: "PATCH", patch: { sidebarCollapsed: !S().sidebarCollapsed } }),
       setImmersive: (immersive: boolean) => dispatch({ type: "PATCH", patch: { immersive } }),
+      toggleImmersive: () => dispatch({ type: "PATCH", patch: { immersive: !S().immersive } }),
       toggleQueue: () => dispatch({ type: "PATCH", patch: { queueOpen: !S().queueOpen } }),
       setQueueOpen: (queueOpen: boolean) => dispatch({ type: "PATCH", patch: { queueOpen } }),
       openSettings: () => dispatch({ type: "PATCH", patch: { settingsOpen: true, settingsMinimized: false } }),
@@ -490,7 +660,10 @@ function useBuildActions(dispatch: React.Dispatch<Action>, stateRef: React.Mutab
       },
       toggleFloatingLyrics: () => dispatch({ type: "PATCH", patch: { floatingLyrics: !S().floatingLyrics } }),
       setWindowMode: (windowMode: WindowMode) => {
-        if (windowMode === "sleep") engine.pause();
+        if (windowMode === "sleep") {
+          engine.pause();
+          if (S().nativeActive) void nativePlayer.pause();
+        }
         dispatch({ type: "PATCH", patch: { windowMode, immersive: windowMode === "normal" ? S().immersive : false } });
       },
       updateSettings: (patch: Partial<Settings>) => dispatch({ type: "SETTINGS", patch }),
@@ -548,8 +721,9 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     });
   }, []);
 
-  // Load local library from IndexedDB, then restore session
+  // Load local library from IndexedDB, then restore session (browser mode only)
   useEffect(() => {
+    if (inTauri) return;
     if (restored.current) return;
     restored.current = true;
     (async () => {
@@ -585,6 +759,150 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     })();
   }, []);
 
+  // Native (Rust) playback state
+  useEffect(() => {
+    if (!inTauri) return;
+    let alive = true;
+    let unlisten: (() => void) | undefined;
+    let lastError = "";
+    let lastInfo = "";
+    let wasFinished = false;
+    void nativePlayer
+      .subscribe((snap) => {
+        if (!alive) return;
+        const s = stateRef.current;
+        const cur = s.tracks.find((t) => t.id === s.currentId);
+        if (!cur?.path || cur.path !== snap.path) return;
+        if (!s.nativeActive) dispatch({ type: "PATCH", patch: { nativeActive: true } });
+        setTime({ currentTime: snap.position, duration: snap.duration, buffered: 0 });
+        dispatch({ type: "PATCH", patch: { isPlaying: snap.playing, waiting: false } });
+        if (snap.duration > 0 && Math.abs(cur.duration - snap.duration) > 1) {
+          dispatch({ type: "UPDATE_TRACK", id: cur.id, patch: { duration: snap.duration } });
+        }
+        const info = [snap.loaded, snap.playing, snap.device, snap.outputMode, snap.outputRate, snap.outputBits, snap.bitPerfectVerdict, snap.error, snap.note].join("|");
+        if (info !== lastInfo) {
+          lastInfo = info;
+          dispatch({ type: "PATCH", patch: { native: snap } });
+        }
+        if (snap.error && snap.error !== lastError) {
+          lastError = snap.error;
+          actionsRef.current.toast(snap.error, "error");
+        }
+        if (snap.finished && !wasFinished) actionsRef.current.next(true);
+        wasFinished = snap.finished;
+      })
+      .then((fn) => {
+        if (alive) unlisten = fn;
+        else fn();
+      });
+    return () => {
+      alive = false;
+      unlisten?.();
+    };
+  }, []);
+
+  // Native library (SQLite) sync + session restore
+  const nativeRestored = useRef(false);
+  useEffect(() => {
+    if (!inTauri) return;
+    let alive = true;
+    let refreshTimer = 0;
+    const unlisteners: (() => void)[] = [];
+    const refresh = () => {
+      window.clearTimeout(refreshTimer);
+      refreshTimer = window.setTimeout(() => {
+        if (alive) void actionsRef.current.refreshLibrary();
+      }, 250);
+    };
+    void subscribeScan((status) => {
+      if (!alive) return;
+      if (status.scanning) {
+        dispatch({
+          type: "PATCH",
+          patch: { importing: { total: Math.max(status.scanned, 1), done: status.imported + status.skipped } },
+        });
+      } else {
+        dispatch({ type: "PATCH", patch: { importing: null } });
+        refresh();
+        if (status.imported || status.skipped) {
+          actionsRef.current.toast(
+            `导入完成：新增 ${status.imported} 首${status.skipped ? `，跳过 ${status.skipped} 首重复` : ""}`,
+            "success",
+          );
+        } else if (status.errors) {
+          actionsRef.current.toast(`导入结束，${status.errors} 个文件解析失败`, "error");
+        }
+      }
+    }).then((fn) => (alive ? unlisteners.push(fn) : fn()));
+    void subscribeLibraryChanged(refresh).then((fn) => (alive ? unlisteners.push(fn) : fn()));
+
+    void (async () => {
+      const locals = await actionsRef.current.refreshLibrary();
+      if (!alive || nativeRestored.current) return;
+      nativeRestored.current = true;
+      const s = stateRef.current;
+      void nativePlayer.setOutputMode(s.settings.outputMode).catch(() => {});
+      const all = [...s.tracks, ...locals];
+      const cur = all.find((t) => t.id === s.currentId);
+      if (cur && s.settings.restoreSession) {
+        let at = 0;
+        try {
+          const saved = JSON.parse(localStorage.getItem(LS_TIME) || "null");
+          if (s.settings.rememberProgress && saved?.id === cur.id) at = saved.t || 0;
+        } catch {
+          /* noop */
+        }
+        if (cur.path) {
+          dispatch({ type: "PATCH", patch: { nativeActive: true } });
+          void nativePlayer.load(cur.path, { autoplay: false, startAt: at, cueStart: cur.cueStart, cueEnd: cur.cueEnd });
+          if (!cur.lrc) {
+            void loadTrackLyrics(cur.path).then((lrc) => {
+              if (lrc) dispatch({ type: "UPDATE_TRACK", id: cur.id, patch: { lrc } });
+            });
+          }
+        } else if (cur.src) {
+          dispatch({ type: "PATCH", patch: { nativeActive: false } });
+          getEngine().load(cur.src, { autoplay: false, startAt: at });
+        }
+      } else if (!cur) {
+        dispatch({ type: "PATCH", patch: { currentId: null } });
+      }
+    })();
+
+    return () => {
+      alive = false;
+      window.clearTimeout(refreshTimer);
+      for (const fn of unlisteners) fn();
+    };
+  }, []);
+
+  // Global media shortcuts emitted by the Rust hotkey thread / SMTC
+  useEffect(() => {
+    if (!inTauri || !state.settings.shortcutsEnabled) return;
+    let alive = true;
+    let unlisten: (() => void) | undefined;
+    void nativePlayer
+      .subscribeShortcut((action) => {
+        const a = actionsRef.current;
+        if (action === "toggle") a.togglePlay();
+        else if (action === "previous") a.prev();
+        else if (action === "next") a.next();
+        else if (action === "volume-up") a.nudgeVolume(0.05);
+        else if (action === "volume-down") a.nudgeVolume(-0.05);
+        else if (action === "immersive") a.toggleImmersive();
+        else if (action === "lyrics") a.toggleFloatingLyrics();
+        else if (action === "queue") a.toggleQueue();
+      })
+      .then((fn) => {
+        if (alive) unlisten = fn;
+        else fn();
+      });
+    return () => {
+      alive = false;
+      unlisten?.();
+    };
+  }, [state.settings.shortcutsEnabled]);
+
   // Persist
   useEffect(() => {
     const { loopMode, volume, muted, rate, liked, recent, sidebarCollapsed, floatingLyrics, settings, queue, currentId } = state;
@@ -597,9 +915,15 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
   // Engine parameter sync
   const st = state.settings;
-  useEffect(() => getEngine().setVolume(state.volume), [state.volume]);
+  useEffect(() => {
+    getEngine().setVolume(state.volume);
+    if (inTauri) void nativePlayer.setVolume(state.muted ? 0 : state.volume);
+  }, [state.volume, state.muted]);
   useEffect(() => getEngine().setMuted(state.muted), [state.muted]);
-  useEffect(() => getEngine().setRate(state.rate), [state.rate]);
+  useEffect(() => {
+    getEngine().setRate(state.rate);
+    if (inTauri) void nativePlayer.setSpeed(state.rate);
+  }, [state.rate]);
   useEffect(() => getEngine().setEq(st.eqEnabled, st.eqBands, st.preamp), [st.eqEnabled, st.eqBands, st.preamp]);
   useEffect(() => getEngine().setNormalize(st.normalize), [st.normalize]);
   useEffect(() => getEngine().setPreservePitch(st.preservePitch), [st.preservePitch]);
@@ -623,9 +947,12 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     root.classList.toggle("reduce-motion", st.reduceMotion);
   }, [st.blur, st.glassAlpha, st.ambientIntensity, st.lyricSize, st.accent, st.reduceMotion, current?.palette]);
 
-  // Document title + Media Session
+  // Document title + Media Session + Windows SMTC
   useEffect(() => {
     document.title = current ? `${state.isPlaying ? "▶ " : ""}${current.title} · ${current.artist} — MateMusic` : "MateMusic · 高定音乐播放器";
+    if (inTauri && current) {
+      void nativePlayer.setMetadata(current.title, current.artist, current.album).catch(() => {});
+    }
     if (!("mediaSession" in navigator) || !current) return;
     const abs = (u: string) => new URL(u, location.href).href;
     try {

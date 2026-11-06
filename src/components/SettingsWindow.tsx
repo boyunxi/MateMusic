@@ -1,13 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion, useDragControls } from "framer-motion";
-import { AudioLines, Info, Keyboard, Minus, Palette, Settings2, SlidersHorizontal, Speaker, X, RotateCcw, Trash2, Check } from "lucide-react";
+import { AudioLines, FolderInput, Info, Keyboard, Minus, Palette, Settings2, SlidersHorizontal, Speaker, X, RotateCcw, Trash2, Check } from "lucide-react";
 import { ACCENTS, useActions, useCurrentTrack, usePlayer } from "../store/PlayerStore";
 import { EQ_FREQS, getEngine } from "../lib/audioEngine";
-import { formatBytes } from "../lib/utils";
+import { formatBytes, formatDurationLong } from "../lib/utils";
 import { cn } from "../utils/cn";
 import { Kbd, Select, Slider, SPRING, Switch } from "./ui";
 import { Logo } from "./Shell";
 import type { AccentKey } from "../types";
+import { inTauri } from "../lib/tauri";
+import { getLibraryStats, type LibraryStats } from "../lib/nativeLibrary";
 
 const SECTIONS = [
   { id: "general", label: "常规设置", icon: Settings2 },
@@ -139,8 +141,14 @@ export function SettingsWindow() {
   const canvas = useRef<HTMLDivElement>(null);
   const [active, setActive] = useState<string>("general");
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
+  const [libStats, setLibStats] = useState<LibraryStats | null>(null);
   const lockSpy = useRef(0);
   const engine = getEngine();
+
+  useEffect(() => {
+    if (!inTauri || !s.settingsOpen) return;
+    void getLibraryStats().then(setLibStats).catch(() => {});
+  }, [s.settingsOpen, s.tracks.length]);
 
   // Output device discovery
   useEffect(() => {
@@ -303,25 +311,77 @@ export function SettingsWindow() {
                     </Row>
                   </Section>
 
-                  <Section id="audio" title="音频与输出设备" desc="输出路由、动态处理与播放过渡">
-                    <Row title="输出设备" desc={engine.supportsSink ? "切换音频输出到指定扬声器或耳机" : "当前浏览器不支持切换输出设备，将使用系统默认设备"}>
-                      <Select
-                        value={st.outputDeviceId}
-                        width="w-56"
-                        onChange={async (v) => {
-                          a.updateSettings({ outputDeviceId: v });
-                          const ok = await engine.setSink(v);
-                          a.toast(ok ? "输出设备已切换" : "切换失败，已保持当前设备", ok ? "success" : "error");
-                        }}
-                        options={[{ value: "", label: "系统默认设备" }, ...devices.map((d, i) => ({ value: d.deviceId, label: d.label || `音频输出设备 ${i + 1}` }))]}
-                      />
-                    </Row>
-                    <Row title="当前音频通路" desc={engine.usingFx ? "Web Audio 高保真通路：均衡器、标准化与实时频谱全部生效" : "直通模式：开始播放后将自动启用 Web Audio 处理通路"}>
-                      <span className={cn("flex h-7 shrink-0 items-center gap-1.5 rounded-full px-3 text-[11.5px] font-medium", engine.usingFx ? "bg-emerald-400/15 text-emerald-300" : "bg-white/10 text-white/60")}>
-                        <AudioLines className="h-3.5 w-3.5 shrink-0" />
-                        {engine.usingFx ? "Web Audio" : "Direct"}
-                      </span>
-                    </Row>
+                  <Section id="audio" title="音频与输出设备" desc={inTauri ? "Rust 音频核心：独占直通、Bit-Perfect 与系统媒体控制" : "输出路由、动态处理与播放过渡"}>
+                    {inTauri ? (
+                      <>
+                        <Row title="输出模式" desc="独占模式绕过系统混音器，共享模式兼容其他应用；ASIO 仅在有可用驱动时生效">
+                          <Select
+                            value={st.outputMode}
+                            width="w-44"
+                            onChange={(v) => a.setOutputMode(v as "shared" | "exclusive" | "asio")}
+                            options={[
+                              { value: "shared", label: "共享 Shared" },
+                              { value: "exclusive", label: "独占 Exclusive" },
+                              { value: "asio", label: "ASIO" },
+                            ]}
+                          />
+                        </Row>
+                        <Row title="输出设备" desc={s.native?.loaded ? `${s.native.device} · ${s.native.outputRate} Hz / ${s.native.outputBits ?? s.native.bits ?? "?"} bit · ${s.native.outputFormat}` : "播放本地曲目后显示实际输出参数"}>
+                          <span className="flex h-7 shrink-0 items-center gap-1.5 rounded-full bg-white/10 px-3 text-[11.5px] font-medium text-white/70">
+                            <AudioLines className="h-3.5 w-3.5 shrink-0" />
+                            {s.native?.outputMode ?? st.outputMode}
+                          </span>
+                        </Row>
+                        <Row title="音频通路" desc={s.nativeActive ? "本地曲目由 Rust 核心解码并直通输出，WebView 只负责界面与状态" : "当前为精选/网络音源，使用 WebView 内 Web Audio 通路"}>
+                          <span className={cn("flex h-7 shrink-0 items-center gap-1.5 rounded-full px-3 text-[11.5px] font-medium", s.nativeActive ? "bg-emerald-400/15 text-emerald-300" : "bg-white/10 text-white/60")}>
+                            <AudioLines className="h-3.5 w-3.5 shrink-0" />
+                            {s.nativeActive ? "Rust Core" : "Web Audio"}
+                          </span>
+                        </Row>
+                        <Row title="Bit-Perfect" desc={s.native?.bitPerfectReasons?.length ? s.native.bitPerfectReasons.join(" · ") : "源文件采样格式与输出设备一致时，标记为 Bit-Perfect"}>
+                          <span
+                            className={cn(
+                              "flex h-7 shrink-0 items-center gap-1.5 rounded-full px-3 text-[11.5px] font-medium",
+                              s.native?.bitPerfectVerdict === "bit-perfect"
+                                ? "bg-emerald-400/15 text-emerald-300"
+                                : s.native?.bitPerfectVerdict === "not-bit-perfect"
+                                  ? "bg-amber-400/15 text-amber-300"
+                                  : "bg-white/10 text-white/60",
+                            )}
+                          >
+                            <Check className="h-3.5 w-3.5 shrink-0" />
+                            {s.native?.bitPerfectVerdict === "bit-perfect"
+                              ? "Bit-Perfect"
+                              : s.native?.bitPerfectVerdict === "not-bit-perfect"
+                                ? "非直通"
+                                : s.native?.bitPerfectVerdict === "unverifiable"
+                                  ? "待验证"
+                                  : "待机"}
+                          </span>
+                        </Row>
+                      </>
+                    ) : (
+                      <>
+                        <Row title="输出设备" desc={engine.supportsSink ? "切换音频输出到指定扬声器或耳机" : "当前浏览器不支持切换输出设备，将使用系统默认设备"}>
+                          <Select
+                            value={st.outputDeviceId}
+                            width="w-56"
+                            onChange={async (v) => {
+                              a.updateSettings({ outputDeviceId: v });
+                              const ok = await engine.setSink(v);
+                              a.toast(ok ? "输出设备已切换" : "切换失败，已保持当前设备", ok ? "success" : "error");
+                            }}
+                            options={[{ value: "", label: "系统默认设备" }, ...devices.map((d, i) => ({ value: d.deviceId, label: d.label || `音频输出设备 ${i + 1}` }))]}
+                          />
+                        </Row>
+                        <Row title="当前音频通路" desc={engine.usingFx ? "Web Audio 高保真通路：均衡器、标准化与实时频谱全部生效" : "直通模式：开始播放后将自动启用 Web Audio 处理通路"}>
+                          <span className={cn("flex h-7 shrink-0 items-center gap-1.5 rounded-full px-3 text-[11.5px] font-medium", engine.usingFx ? "bg-emerald-400/15 text-emerald-300" : "bg-white/10 text-white/60")}>
+                            <AudioLines className="h-3.5 w-3.5 shrink-0" />
+                            {engine.usingFx ? "Web Audio" : "Direct"}
+                          </span>
+                        </Row>
+                      </>
+                    )}
                     <Row title="音量标准化" desc="使用动态压缩平衡不同歌曲之间的响度差异">
                       <Switch checked={st.normalize} onChange={(v) => a.updateSettings({ normalize: v })} />
                     </Row>
@@ -336,7 +396,7 @@ export function SettingsWindow() {
                     )}
                   </Section>
 
-                  <Section id="eq" title="音效与均衡器" desc="10 段参数均衡器，实时作用于播放音频">
+                  <Section id="eq" title="音效与均衡器" desc={inTauri ? "10 段参数均衡器；本地曲目由 Rust 独占通路直通，EQ 仅作用于精选/网络音源" : "10 段参数均衡器，实时作用于播放音频"}>
                     <Row title="启用均衡器">
                       <Select
                         value={st.eqPreset}
@@ -457,7 +517,7 @@ export function SettingsWindow() {
                         <span className="truncate text-[20px] font-bold">MateMusic</span>
                         <span className="truncate text-[12px] tabular-nums text-white/50">Version 1.0.0 · Spatial Glass Edition</span>
                         <div className="mt-2 flex flex-wrap gap-1.5">
-                          {["React", "TypeScript", "Tailwind CSS", "Framer Motion", "Web Audio API", "IndexedDB"].map((x) => (
+                          {["React", "TypeScript", "Tailwind CSS", "Framer Motion", inTauri ? "Tauri 2 · Rust" : "Web Audio API", inTauri ? "SQLite · WASAPI" : "IndexedDB"].map((x) => (
                             <span key={x} className="shrink-0 rounded-full border border-white/12 bg-white/[0.05] px-2 py-0.5 text-[10.5px] text-white/60">
                               {x}
                             </span>
@@ -468,7 +528,20 @@ export function SettingsWindow() {
                     <Row title="内置曲目致谢" desc="内置音乐由 Kevin MacLeod (incompetech.com) 创作，基于 Creative Commons: By Attribution 4.0 许可，经 Internet Archive 提供。歌词为 MateMusic 原创意境词。">
                       <span className="shrink-0 rounded-md border border-white/15 px-2 py-0.5 text-[11px] text-white/60">CC BY 4.0</span>
                     </Row>
-                    <Row title="本地曲库" desc={`${localStats.count} 首歌曲 · 占用 ${formatBytes(localStats.bytes)}（保存在本机浏览器 IndexedDB）`}>
+                    <Row
+                      title="本地曲库"
+                      desc={
+                        inTauri
+                          ? `${libStats?.tracks ?? localStats.count} 首歌曲 · ${libStats?.folders ?? 0} 个目录 · ${libStats?.albums ?? 0} 张专辑 · ${formatDurationLong(libStats?.totalDuration ?? 0)}（SQLite）`
+                          : `${localStats.count} 首歌曲 · 占用 ${formatBytes(localStats.bytes)}（保存在本机浏览器 IndexedDB）`
+                      }
+                    >
+                      {inTauri && (
+                        <button onClick={() => void a.pickFolder()} className="neu-btn flex h-8 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full px-3.5 text-[12px] font-medium text-white/80">
+                          <FolderInput className="h-3.5 w-3.5 shrink-0" />
+                          扫描文件夹
+                        </button>
+                      )}
                       <ConfirmButton label="清空本地曲库" confirmLabel="确认清空" onConfirm={() => void a.clearLocal()} />
                     </Row>
                     <Row title="恢复默认设置" desc="重置外观、音效与偏好，不会删除曲库">

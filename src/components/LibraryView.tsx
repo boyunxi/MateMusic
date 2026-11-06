@@ -8,7 +8,7 @@ import { formatDurationLong } from "../lib/utils";
 import { cn } from "../utils/cn";
 import { Cover, Select, SPRING } from "./ui";
 import { TrackTable } from "./TrackTable";
-import { openFilePicker } from "./Shell";
+import { inTauri } from "../lib/tauri";
 
 type SourceFilter = "all" | "preset" | "local";
 type SortKey = "default" | "title" | "artist" | "duration" | "added";
@@ -98,7 +98,7 @@ function FeaturedBanner({ list }: { list: Track[] }) {
           >
             随机播放
           </PrimaryAction>
-          <PrimaryAction icon={Upload} variant="neu" onClick={openFilePicker}>
+          <PrimaryAction icon={Upload} variant="neu" onClick={() => void a.pickFiles()}>
             导入本地音乐
           </PrimaryAction>
         </div>
@@ -281,17 +281,22 @@ export function LibraryView() {
   let empty: React.ReactNode = null;
   if (s.nav === "library") {
     header = <FeaturedBanner list={list} />;
-    empty = searchEmpty ?? <Empty icon={Music2} title="这里还没有歌曲" desc="切换筛选条件，或导入你的本地音乐。" action={<PrimaryAction icon={Upload} onClick={openFilePicker}>导入本地音乐</PrimaryAction>} />;
+    empty = searchEmpty ?? <Empty icon={Music2} title="这里还没有歌曲" desc="切换筛选条件，或导入你的本地音乐。" action={<PrimaryAction icon={Upload} onClick={() => void a.pickFiles()}>导入本地音乐</PrimaryAction>} />;
   } else if (s.nav === "local") {
     header = (
       <ViewHeader
         art={<IconArt icon={FolderInput} gradient="linear-gradient(135deg,#22d3ee,#6366f1)" />}
         eyebrow="Local Library"
         title="本地导入"
-        desc={`${base.length} 首本地歌曲 · ${totalDur} · 支持拖拽 MP3 / FLAC / WAV 及同名 .lrc 歌词到窗口任意位置`}
+        desc={
+          inTauri
+            ? `${base.length} 首本地歌曲 · ${totalDur} · 曲库保存在本机 SQLite，由 Rust 音频核心直通输出`
+            : `${base.length} 首本地歌曲 · ${totalDur} · 支持拖拽 MP3 / FLAC / WAV 及同名 .lrc 歌词到窗口任意位置`
+        }
         actions={
           <>
-            <PrimaryAction icon={Upload} onClick={openFilePicker}>选择文件</PrimaryAction>
+            <PrimaryAction icon={Upload} onClick={() => void a.pickFiles()}>选择文件</PrimaryAction>
+            {inTauri && <PrimaryAction icon={FolderInput} variant="neu" onClick={() => void a.pickFolder()}>扫描文件夹</PrimaryAction>}
             {base.length > 0 && <PrimaryAction icon={Play} variant="neu" onClick={playAll}>播放全部</PrimaryAction>}
           </>
         }
@@ -301,14 +306,14 @@ export function LibraryView() {
       searchEmpty ??
       (
         <button
-          onClick={openFilePicker}
+          onClick={() => void a.pickFiles()}
           className="group flex w-full max-w-lg flex-col items-center rounded-3xl border-2 border-dashed border-white/15 px-8 py-10 text-center transition hover:border-accent/60 hover:bg-white/[0.03]"
         >
           <div className="neu-btn mb-4 grid h-16 w-16 shrink-0 place-items-center rounded-2xl transition group-hover:scale-105">
             <Upload className="h-7 w-7 text-accent" />
           </div>
           <p className="text-[15px] font-semibold">拖拽音乐文件到这里，或点击选择</p>
-          <p className="mt-1.5 text-[12.5px] leading-relaxed text-white/50">支持多选 .mp3 / .flac / .wav，自动解析 ID3 / Vorbis 标签、内嵌封面与同名 .lrc 歌词。导入的歌曲将安全保存在本机浏览器中。</p>
+          <p className="mt-1.5 text-[12.5px] leading-relaxed text-white/50">{inTauri ? "支持多选音频文件，自动解析标签、内嵌封面与同名 LRC / SRT / TTML / ASS 歌词；导入后写入本机曲库并由 Rust 音频核心播放。" : "支持多选 .mp3 / .flac / .wav，自动解析 ID3 / Vorbis 标签、内嵌封面与同名 .lrc 歌词。导入的歌曲将安全保存在本机浏览器中。"}</p>
         </button>
       );
   } else if (s.nav === "recent") {

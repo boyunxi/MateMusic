@@ -17,6 +17,12 @@ export interface Track {
   tags?: string[];
   addedAt: number;
   fileSize?: number;
+  /** Absolute path on disk (Tauri library tracks). */
+  path?: string;
+  /** SQLite track id (Tauri library tracks). */
+  libraryId?: number;
+  cueStart?: number;
+  cueEnd?: number;
 }
 
 export type LoopMode = "list" | "one" | "shuffle";
@@ -31,6 +37,7 @@ export interface Settings {
   closeBehavior: "sleep" | "mini";
   doubleClickAction: "play" | "queue";
   outputDeviceId: string;
+  outputMode: "shared" | "exclusive" | "asio";
   normalize: boolean;
   preservePitch: boolean;
   fade: boolean;
