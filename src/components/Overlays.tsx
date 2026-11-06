@@ -148,12 +148,11 @@ export function MiniPlayer() {
     <div data-tauri-drag-region className="relative grid h-full w-full place-items-center">
       <AmbientBackground />
       <motion.div
-        drag
-        dragMomentum={false}
+        data-tauri-drag-region
         initial={{ opacity: 0, scale: 0.9, y: 20 }}
         animate={{ opacity: 1, scale: 1, y: 0 }}
         transition={SPRING}
-        className="glass relative flex w-[400px] cursor-grab flex-col gap-4 overflow-hidden rounded-[28px] p-5 active:cursor-grabbing"
+        className="glass relative flex w-[400px] flex-col gap-4 overflow-hidden rounded-[28px] p-5"
       >
         <div className="flex min-w-0 items-center gap-2">
           <Logo size={22} />

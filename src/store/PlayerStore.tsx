@@ -6,6 +6,7 @@ import { db, type StoredTrack } from "../lib/db";
 import { parseFileName, parseMetadata, probeDuration } from "../lib/metadata";
 import { extractPalette, generatedCover, hashString, paletteFromSeed } from "../lib/utils";
 import { inTauri, pickAudioFiles, pickMusicFolder } from "../lib/tauri";
+import { enterMiniWindow, exitMiniWindow } from "../lib/windowBounds";
 import { nativePlayer, type NativeSnapshot, type OutputMode } from "../lib/nativePlayer";
 import {
   clearLibrary,
@@ -677,6 +678,11 @@ function useBuildActions(dispatch: React.Dispatch<Action>, stateRef: React.Mutab
       },
       toggleFloatingLyrics: () => dispatch({ type: "PATCH", patch: { floatingLyrics: !S().floatingLyrics } }),
       setWindowMode: (windowMode: WindowMode) => {
+        const previous = S().windowMode;
+        if (inTauri) {
+          if (windowMode === "mini") void enterMiniWindow();
+          else if (previous === "mini") void exitMiniWindow();
+        }
         if (windowMode === "sleep") {
           engine.pause();
           if (S().nativeActive) void nativePlayer.pause();

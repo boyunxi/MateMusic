@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import { PlayerProvider, useActions, usePlayer } from "./store/PlayerStore";
 import { AmbientBackground, ResizeHandles, Sidebar, TitleBar } from "./components/Shell";
 import { LibraryView } from "./components/LibraryView";
@@ -6,6 +7,8 @@ import { QueueDrawer } from "./components/QueueDrawer";
 import { ImmersivePlayer } from "./components/ImmersivePlayer";
 import { SettingsWindow } from "./components/SettingsWindow";
 import { DropOverlay, ImportProgress, MiniPlayer, SleepScreen, Toasts, useDropImport, useShortcuts } from "./components/Overlays";
+import { cn } from "./utils/cn";
+import { ensureNormalWindow } from "./lib/windowBounds";
 
 function MateMusicShell() {
   const s = usePlayer();
@@ -13,8 +16,17 @@ function MateMusicShell() {
   const dragging = useDropImport();
   useShortcuts();
 
+  useEffect(() => {
+    void ensureNormalWindow();
+  }, []);
+
   return (
-    <div className="relative flex h-screen w-screen min-h-[640px] min-w-[960px] select-none flex-col overflow-hidden text-white">
+    <div
+      className={cn(
+        "relative flex h-screen w-screen select-none flex-col overflow-hidden text-white",
+        s.windowMode === "normal" && "min-h-[640px] min-w-[960px]",
+      )}
+    >
       <input
         id="mm-file-input"
         type="file"
@@ -52,7 +64,7 @@ function MateMusicShell() {
       <ImportProgress />
       <Toasts />
       <DropOverlay show={dragging} />
-      <ResizeHandles />
+      {s.windowMode === "normal" && <ResizeHandles />}
     </div>
   );
 }
