@@ -1,0 +1,12 @@
+FFmpeg binaries bundled with MateMusic
+======================================
+
+This application bundles FFmpeg (ffmpeg.exe, ffprobe.exe) built by the
+BtbN/FFmpeg-Builds project under the LGPL v3 license.
+
+- FFmpeg project: https://ffmpeg.org/
+- License: https://ffmpeg.org/legal.html
+- Build source: https://github.com/BtbN/FFmpeg-Builds
+
+The binaries are not committed to git; run `npm run ffmpeg:fetch` (also runs
+automatically before `npm run dev` / `npm run build`) to download them.

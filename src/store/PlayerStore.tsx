@@ -277,7 +277,7 @@ function useBuildActions(dispatch: React.Dispatch<Action>, stateRef: React.Mutab
     const engine = getEngine();
     const S = () => stateRef.current;
     const find = (id: string | null) => (id ? S().tracks.find((t) => t.id === id) : undefined);
-    const playable = (t?: Track) => !!t && !(inTauri && t.path && t.unsupported);
+    const playable = (t?: Track) => !!t;
 
     const toast = (text: string, tone: Toast["tone"] = "info") => {
       const id = toastSeq.current++;
@@ -288,10 +288,6 @@ function useBuildActions(dispatch: React.Dispatch<Action>, stateRef: React.Mutab
     const startTrack = (id: string, autoplay = true, startAt = 0) => {
       const t = find(id);
       if (!t) return;
-      if (!playable(t)) {
-        toast(`当前音频核心不支持 ${t.format} 格式（未引入 FFmpeg）`, "error");
-        return;
-      }
       dispatch({ type: "PLAY_START", id });
       if (inTauri && t.path) {
         engine.stop();
@@ -865,13 +861,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       void nativePlayer.setOutputMode(s.settings.outputMode).catch(() => {});
       const all = [...s.tracks, ...locals];
       const cur = all.find((t) => t.id === s.currentId);
-      if (cur?.unsupported) {
-        dispatch({ type: "PATCH", patch: { currentId: null, nativeActive: false } });
-        actionsRef.current.toast(
-          `上次播放的「${cur.title}」为 ${cur.format} 格式，当前音频核心不支持（未引入 FFmpeg）`,
-          "error",
-        );
-      } else if (cur && s.settings.restoreSession) {
+      if (cur && s.settings.restoreSession) {
         let at = 0;
         try {
           const saved = JSON.parse(localStorage.getItem(LS_TIME) || "null");
@@ -951,6 +941,11 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     getEngine().setRate(state.rate);
     if (inTauri) void nativePlayer.setSpeed(state.rate);
   }, [state.rate]);
+  useEffect(() => {
+    if (inTauri) {
+      void nativePlayer.setDsp(st.eqEnabled, st.eqBands, st.preamp, st.normalize).catch(() => {});
+    }
+  }, [st.eqEnabled, st.eqBands, st.preamp, st.normalize]);
   useEffect(() => getEngine().setEq(st.eqEnabled, st.eqBands, st.preamp), [st.eqEnabled, st.eqBands, st.preamp]);
   useEffect(() => getEngine().setNormalize(st.normalize), [st.normalize]);
   useEffect(() => getEngine().setPreservePitch(st.preservePitch), [st.preservePitch]);

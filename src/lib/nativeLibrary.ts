@@ -1,7 +1,6 @@
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import type { Track } from "../types";
 import { generatedCover, paletteFromSeed } from "./utils";
-import { isNativeDecodable } from "./formats";
 import { assetUrl, inTauri, invoke, tauriListen } from "./tauri";
 
 export interface LibraryTrackRow {
@@ -77,9 +76,12 @@ export function libraryRowToTrack(row: LibraryTrackRow): Track {
   const artist = row.artist || "未知艺术家";
   const album = row.album || "未知专辑";
   const format = extensionOf(row.path);
-  const hiRes = (row.bits ?? 0) > 16 || (row.sampleRate ?? 0) > 48000;
-  const quality =
-    row.bits && row.sampleRate
+  const dsdMatch = /dsd/i.test(row.codec ?? "") || /^(DSF|DFF)$/.test(format);
+  const dsdMultiple = Math.max(1, Math.round((row.sampleRate ?? 2822400) / 44100));
+  const hiRes = dsdMatch || (row.bits ?? 0) > 16 || (row.sampleRate ?? 0) > 48000;
+  const quality = dsdMatch
+    ? `DSD${dsdMultiple}`
+    : row.bits && row.sampleRate
       ? `${row.bits}bit / ${formatKhz(row.sampleRate)}`
       : row.bitrate
         ? `${Math.round(row.bitrate / 1000)} kbps`
@@ -102,7 +104,6 @@ export function libraryRowToTrack(row: LibraryTrackRow): Track {
     libraryId: row.id,
     cueStart: row.cueStart ?? undefined,
     cueEnd: row.cueEnd ?? undefined,
-    unsupported: !isNativeDecodable(row.path),
   };
 }
 

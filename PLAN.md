@@ -82,19 +82,19 @@ WebView 的 `<audio>` / Web Audio 会把采样率、格式支持、输出设备�
 | 长列表 | `@tanstack/react-virtual` | 10 万级曲库滚动不卡顿 |
 | 动效 | Motion（Framer Motion） | 页面转场、歌词过渡、封面切换 |
 | 样式 | 原生 CSS Variables + 设计令牌 | 精确控制磨砂玻璃、对比度与减少动效 |
-| 音频解码 | Symphonia（纯 Rust，当前不引入 FFmpeg） | 覆盖 FLAC / ALAC / MP3 / AAC / WAV / OGG；Opus / WMA / APE / DSD 暂保持「缺少解码器」提示，解码器抽象已隔离，后续可按需接入 |
-| 元数据 | Symphonia 元数据 + 自研兜底 | 标签、封面与播放参数同源解析；后续按格式缺口补充 lofty |
+| 音频解码 | FFmpeg sidecar（`ffmpeg.exe` / `ffprobe.exe`，随应用分发，LGPL v3） | 覆盖 APE / DSD(DSF/DFF) / WMA / WavPack / TTA / ALAC / FLAC / MP3 / AAC / OGG / Opus 等；DSD 经低通转 PCM |
+| 元数据 | ffprobe JSON + ffmpeg 封面抽取 + 文件夹封面兜底 | 标签、时长、采样率、位深、声道、内嵌封面与格式缺口统一解析 |
 | 输出 | `cpal` 实现 WASAPI 共享；`windows` crate 直连 WASAPI 独占；ASIO 通过 cpal 可选 feature | 独占模式精确控制格式协商与缓冲；ASIO 默认构建不启用，`--features asio` 时可用，失败自动回退共享并提示 |
-| 倍速 | 自研 WSOLA 时间伸缩（`atempo` 等价，纯 Rust） | 保持音高、无 FFmpeg 依赖；输出帧数按 speed 映射回源时间轴，歌词 / CUE 共用 |
+| 倍速 / DSP | 自研 WSOLA 倍速 + Rust 10 段 EQ / 响度 AGC | FFmpeg 负责解码；DSP 在解码后、输出前实时处理；输出帧数按 speed 映射回源时间轴 |
 | 数据库 | SQLite（`rusqlite` bundled） | 本地、零配置、事务可靠 |
 | 文件监控 | `notify` | 目录增量扫描 |
-| 打包 | Tauri 安装包 + FFmpeg LGPL 动态库 + 许可证声明 | 合规分发 |
+| 打包 | Tauri 安装包 + FFmpeg LGPL sidecar + NOTICE | `npm run ffmpeg:fetch` 首次下载并打包进 `resources/ffmpeg` |
 
 > 实施时锁定具体版本并写入 lockfile；`PLAN.md` 不写死版本号，避免后续依赖升级时文档失真。
 
 ### 2.3 许可证策略（必须遵守）
 
-- FFmpeg 采用 **LGPL 构建、动态链接**，随安装包附带许可证文本与源码获取说明；**禁用 GPL 组件**。
+- FFmpeg 采用 **LGPL v3 构建、以独立可执行文件随包分发**，附带 `NOTICE.txt` 与源码获取说明；**禁用 GPL 组件**。
 - ASIO SDK 有独立授权约束，不默认随包分发；ASIO 支持作为可选模块，按合规方式接入或在安装时由用户自行提供驱动环境。
 - ASIO 可选构建：`cargo/tauri dev --features asio`（或 `cargo build --features asio`）。构建机需要 VS C++ 工具链、LLVM/libclang（bindgen）与 ASIO SDK；`asio-sys` 可将 SDK 下载到临时目录。默认构建不含 ASIO，不影响 WASAPI。
 - 第三方字体、图标、示例音频若引入，统一在 `THIRD_PARTY_NOTICES` 记录来源与许可证。
@@ -154,7 +154,7 @@ WebView 的 `<audio>` / Web Audio 会把采样率、格式支持、输出设备�
 
 不支持项必须返回具体原因（缺少解码器 / 加密 / 文件损坏 / 设备格式不匹配），不得静默失败。
 
-> 当前实测：WAV / FLAC / MP3 / AAC / ALAC / OGG 可解码与播放；Opus / WMA / APE / DSF 返回明确「缺少解码器（未引入 FFmpeg）」，不静默失败。当前构建不随包引入 FFmpeg。
+> 当前实测：WAV / FLAC / MP3 / AAC / ALAC / OGG / Opus / APE / WMA(WMA Lossless) / WavPack / TTA / DSD64 / DSD128 均可解码与播放；元数据与内嵌封面由 ffprobe/ffmpeg 解析。FFmpeg 以 LGPL sidecar 随包分发。
 
 ### 3.4 无缝播放与时钟
 
@@ -322,10 +322,10 @@ MateMusic/
 | 风险 | 影响 | 应对 |
 | --- | --- | --- |
 | 方案把握度 93%，剩余风险集中在冷门格式变体、声卡驱动与 ASIO 兼容性 | 部分设备无法达成独占 / Bit-Perfect | M1 先做解码与输出原型，用真实设备矩阵验证；失败则保底共享模式并如实标注 |
-| 后续引入 FFmpeg | 分发与许可证风险 | 当前构建不引入 FFmpeg；若未来补齐 Opus / WMA / APE / DSD，必须走 LGPL 动态链接、许可证声明与禁用 GPL 组件 |
+| FFmpeg 分发与许可证 | LGPLv3 sidecar 已落地 | 随包附 NOTICE、禁用 GPL 组件；安装包约 89MB（debug，含 FFmpeg） |
 | Symphonia 不覆盖 APE / WMA / DSD | 首期格式矩阵存在缺口 | 解码器抽象隔离；补齐前界面提示「缺少解码器」，不静默失败 |
 | 部分声卡驱动独占初始化成功但不推进 | 独占模式无法实际出声 | 900ms 推进校验 + 自动回退共享；界面显示实际模式与原因；在更多设备上复验 |
-| Opus / WMA / APE / DSD 缺解码器 | 格式矩阵存在缺口 | 明确提示「缺少解码器（未引入 FFmpeg）」；扫描与播放不静默失败，后续按需接入 |
+| DSD 转 PCM / Bit-Perfect | DSD 无法保持 Bit-Perfect | 界面展示源 DSD 速率、转 PCM 与原因，不虚假标记 |
 | 设备热插拔尚未在真实硬件复验 | 驱动差异可能导致恢复失败 | 已用输出故障注入验证暂停/重开/续播；发布前在 USB DAC 与板载声卡上做拔插测试 |
 | ASIO SDK 授权 / 构建门槛 | 默认包无法包含 ASIO | ASIO 做成 `asio` 可选 feature，需要 VS C++ 工具链、LLVM/libclang 与 ASIO SDK；默认构建保持 WASAPI，启用后失败自动回退共享 |
 | WASAPI 独占被其他程序占用 | 播放启动失败 | 明确错误提示 + 自动/手动回退共享模式 |

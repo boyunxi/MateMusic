@@ -167,16 +167,7 @@ export function TrackTable({ tracks, emptyNode }: { tracks: Track[]; emptyNode?:
                   </div>
                   <span className="min-w-0 truncate pr-3 text-[12.5px] text-white/45">{t.album}</span>
                   <span className="flex min-w-0 items-center">
-                    {t.unsupported ? (
-                      <span
-                        title="当前构建未包含该格式解码器（未引入 FFmpeg）"
-                        className="shrink-0 rounded-full border border-rose-400/25 bg-rose-500/15 px-2 py-0.5 text-[10px] font-semibold text-rose-300"
-                      >
-                        不支持
-                      </span>
-                    ) : (
-                      <QualityBadge quality={t.quality} format={t.format} hiRes={t.hiRes} />
-                    )}
+                    <QualityBadge quality={t.quality} format={t.format} hiRes={t.hiRes} />
                   </span>
                   <span className="flex items-center justify-center">
                     <LikeButton id={t.id} size="sm" />

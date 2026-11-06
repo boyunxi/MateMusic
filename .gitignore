@@ -13,3 +13,6 @@ tests/preview-*.png
 .idea/
 .vscode/
 tests/samples/cue/*.wav
+
+# 运行时下载的 FFmpeg 二进制（npm run ffmpeg:fetch）
+src-tauri/resources/ffmpeg/*.exe

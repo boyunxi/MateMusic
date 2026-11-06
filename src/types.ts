@@ -23,8 +23,6 @@ export interface Track {
   libraryId?: number;
   cueStart?: number;
   cueEnd?: number;
-  /** Format cannot be decoded by the bundled native engine. */
-  unsupported?: boolean;
 }
 
 export type LoopMode = "list" | "one" | "shuffle";

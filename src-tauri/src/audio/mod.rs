@@ -1,9 +1,12 @@
+mod dsp;
 mod tempo;
 mod wasapi_exclusive;
 
-use std::fs::File;
-use std::io::ErrorKind;
+pub use dsp::DspSettings;
+
+use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
+use std::process::{Child, ChildStdout};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -19,15 +22,9 @@ use rubato::{
     SincInterpolationType, WindowFunction,
 };
 use serde::Serialize;
-use symphonia::core::audio::SampleBuffer;
-use symphonia::core::codecs::{Decoder, DecoderOptions};
-use symphonia::core::errors::Error as SymphoniaError;
-use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo};
-use symphonia::core::io::MediaSourceStream;
-use symphonia::core::meta::MetadataOptions;
-use symphonia::core::probe::Hint;
-use symphonia::core::units::Time;
 
+use crate::ffmpeg;
+use dsp::DspProcessor;
 use tempo::{TimeStretcher, MAX_SPEED, MIN_SPEED};
 use wasapi_exclusive::ExclusiveHandle;
 
@@ -62,6 +59,7 @@ pub struct PlayerSnapshot {
     pub title: String,
     pub path: String,
     pub codec: String,
+    pub dsd: bool,
     pub sample_rate: u32,
     pub bits: Option<u32>,
     pub channels: usize,
@@ -89,6 +87,7 @@ struct Meta {
     title: String,
     path: String,
     codec: String,
+    dsd: bool,
     sample_rate: u32,
     bits: Option<u32>,
     channels: usize,
@@ -200,6 +199,7 @@ impl Shared {
             title: meta.title.clone(),
             path: meta.path.clone(),
             codec: meta.codec.clone(),
+            dsd: meta.dsd,
             sample_rate: meta.sample_rate,
             bits: meta.bits,
             channels: meta.channels,
@@ -243,6 +243,9 @@ fn evaluate_bit_perfect(
     let dsp_active = (speed - 1.0).abs() > 1e-4 || (volume - 1.0).abs() > 1e-4;
 
     let mut reasons = Vec::new();
+    if meta.dsd {
+        reasons.push("DSD 源已转换为 PCM，无法保持 Bit-Perfect".to_string());
+    }
     if !meta.exclusive {
         reasons.push(if meta.output_mode.contains("共享") {
             "当前为 WASAPI 共享输出，系统混音参与".to_string()
@@ -281,7 +284,8 @@ fn evaluate_bit_perfect(
         reasons.push(format!("音量处理未保持 100%（{:.0}%）", volume * 100.0));
     }
 
-    let bit_perfect = meta.exclusive && rate_match && channels_match && bits_match && !dsp_active;
+    let bit_perfect =
+        meta.exclusive && rate_match && channels_match && bits_match && !dsp_active && !meta.dsd;
     let verdict = if bit_perfect {
         "bit-perfect"
     } else if !meta.exclusive {
@@ -311,6 +315,7 @@ enum Command {
     Seek(f64),
     SetVolume(f32),
     SetSpeed(f32),
+    SetDsp(DspSettings),
     SetOutputMode(OutputMode),
 }
 
@@ -377,6 +382,10 @@ impl AudioEngine {
 
     pub fn set_volume(&self, volume: f32) {
         let _ = self.tx.send(Command::SetVolume(volume.clamp(0.0, 1.0)));
+    }
+
+    pub fn set_dsp(&self, settings: DspSettings) {
+        let _ = self.tx.send(Command::SetDsp(settings));
     }
 
     pub fn set_speed(&self, speed: f32) {
@@ -468,6 +477,8 @@ struct TrackInfo {
     sample_rate: u32,
     bits: Option<u32>,
     channels: usize,
+    dsd: bool,
+    decode_rate: u32,
 }
 
 struct LinearResampler {
@@ -722,45 +733,14 @@ impl OutputResampler {
     }
 }
 
-fn extension_of(path: &Path) -> String {
-    path.extension()
-        .and_then(|ext| ext.to_str())
-        .map(|ext| ext.to_ascii_lowercase())
-        .unwrap_or_default()
-}
-
-fn unsupported_message(path: &Path, detail: &str) -> String {
-    match extension_of(path).as_str() {
-        "ape" => {
-            "缺少 APE 解码器：当前构建只启用 Symphonia，未包含 APE 解码器（未引入 FFmpeg）"
-                .to_string()
-        }
-        "wma" => {
-            "缺少 WMA 解码器：当前构建只启用 Symphonia，未包含 WMA 解码器（未引入 FFmpeg）"
-                .to_string()
-        }
-        "opus" => {
-            "缺少 Opus 解码器：当前构建未包含 Opus 解码器（未引入 FFmpeg），无法播放"
-                .to_string()
-        }
-        "dsf" | "dff" => {
-            "缺少 DSD 解码器：当前构建未包含 DSD 转 PCM 解码器（未引入 FFmpeg），暂不支持 DSF / DFF"
-                .to_string()
-        }
-        _ => format!("无法识别容器格式：{detail}"),
-    }
-}
-
 struct Session {
-    format: Box<dyn FormatReader>,
-    decoder: Box<dyn Decoder>,
-    track_id: u32,
-    src_rate: u32,
-    src_channels: usize,
+    child: Option<Child>,
+    stdout: Option<BufReader<ChildStdout>>,
+    leftover: Vec<u8>,
+    decode_rate: u32,
+    decode_channels: usize,
     src_bits: Option<u32>,
     resampler: OutputResampler,
-    sample_buf: Option<SampleBuffer<f32>>,
-    sample_spec: Option<(u32, usize)>,
     pending: Vec<f32>,
     finished: bool,
     file_duration: f64,
@@ -774,142 +754,100 @@ struct Session {
     speed: f32,
     tempo: TimeStretcher,
     tempo_out: Vec<f32>,
+    dsp: DspProcessor,
+    path: PathBuf,
+    probe: ffmpeg::Probe,
 }
 
 impl Session {
     fn open(path: &Path) -> Result<(Self, TrackInfo), String> {
-        let file =
-            File::open(path).map_err(|e| format!("无法打开文件 {}: {e}", path.display()))?;
-        let mss = MediaSourceStream::new(Box::new(file), Default::default());
-
-        let mut hint = Hint::new();
-        if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-            hint.with_extension(ext);
+        let probe = ffmpeg::probe(path)?;
+        if probe.source_rate == 0 || probe.channels == 0 {
+            return Err("FFmpeg 未返回有效的采样率或声道信息".to_string());
         }
+        let mut child = ffmpeg::spawn_decoder(path, &probe, 0.0)?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| "无法读取 FFmpeg 解码输出".to_string())?;
 
-        let probed = symphonia::default::get_probe()
-            .format(
-                &hint,
-                mss,
-                &FormatOptions {
-                    enable_gapless: true,
-                    ..Default::default()
-                },
-                &MetadataOptions::default(),
-            )
-            .map_err(|e| unsupported_message(path, &e.to_string()))?;
+        let title = probe
+            .title
+            .clone()
+            .or_else(|| {
+                path.file_stem()
+                    .and_then(|name| name.to_str())
+                    .map(|name| name.to_string())
+            })
+            .unwrap_or_else(|| "未知曲目".to_string());
 
-        let mut format = probed.format;
-        let track = format
-            .default_track()
-            .ok_or_else(|| "文件里没有可播放的默认音轨".to_string())?;
-        let track_id = track.id;
-        let params = track.codec_params.clone();
-
-        let codec = symphonia::default::get_codecs()
-            .get_codec(params.codec)
-            .map(|d| d.short_name.to_string())
-            .unwrap_or_else(|| format!("codec#{}", params.codec));
-
-        let sample_rate = params.sample_rate.unwrap_or(0);
-        let channels = params.channels.map(|c| c.count()).unwrap_or(0);
-        let mut decoder = symphonia::default::get_codecs()
-            .make(&params, &DecoderOptions::default())
-            .map_err(|e| {
-                if matches!(
-                    extension_of(path).as_str(),
-                    "ape" | "wma" | "opus" | "dsf" | "dff"
-                ) {
-                    unsupported_message(path, &e.to_string())
-                } else {
-                    format!("缺少解码器: {e}")
-                }
-            })?;
-
-        // MP4 等容器在参数里可能没有采样率/声道，先解一个包拿到真实规格再回到开头
-        let (sample_rate, channels) = if sample_rate == 0 || channels == 0 {
-            let mut probed_rate = sample_rate;
-            let mut probed_channels = channels;
-            if let Ok(packet) = format.next_packet() {
-                if packet.track_id() == track_id {
-                    if let Ok(audio_buf) = decoder.decode(&packet) {
-                        let spec = *audio_buf.spec();
-                        probed_rate = spec.rate;
-                        probed_channels = spec.channels.count();
-                    }
-                }
-            }
-            let _ = format.seek(
-                SeekMode::Accurate,
-                SeekTo::Time {
-                    time: Time::new(0, 0.0),
-                    track_id: Some(track_id),
-                },
-            );
-            decoder.reset();
-            (probed_rate, probed_channels)
-        } else {
-            (sample_rate, channels)
-        };
-
-        if sample_rate == 0 || channels == 0 {
-            return Err("解码结果缺少采样率或声道信息".to_string());
-        }
-
-        let duration = match (params.time_base, params.n_frames) {
-            (Some(tb), Some(frames)) => {
-                let t = tb.calc_time(frames);
-                t.seconds as f64 + t.frac
-            }
-            _ => 0.0,
-        };
-
-        let title = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("未知曲目")
-            .to_string();
-
-        let bits = params.bits_per_sample;
         let info = TrackInfo {
             title,
-            codec,
-            sample_rate,
-            bits,
-            channels,
+            codec: probe.codec_display(),
+            sample_rate: probe.source_rate,
+            bits: probe.bits,
+            channels: probe.channels,
+            dsd: probe.dsd,
+            decode_rate: probe.decode_rate,
         };
 
+        let decode_rate = probe.decode_rate.max(8000);
+        let channels = probe.channels.max(1);
+        let dsp = DspProcessor::new(decode_rate, channels, DspSettings::default());
+
         let session = Self {
-            format,
-            decoder,
-            track_id,
-            src_rate: sample_rate,
-            src_channels: channels,
-            src_bits: bits,
-            resampler: OutputResampler::new(sample_rate, channels, sample_rate, channels),
-            sample_buf: None,
-            sample_spec: None,
+            child: Some(child),
+            stdout: Some(BufReader::new(stdout)),
+            leftover: Vec::new(),
+            decode_rate,
+            decode_channels: channels,
+            src_bits: if probe.dsd { None } else { probe.bits },
+            resampler: OutputResampler::new(decode_rate, channels, decode_rate, channels),
             pending: Vec::new(),
             finished: false,
-            file_duration: duration,
+            file_duration: probe.duration,
             segment_start: 0.0,
-            segment_duration: duration,
+            segment_duration: probe.duration,
             current_offset: 0.0,
             out_rate: 0,
             out_channels: 0,
             emitted_frames: 0,
             frames_limit: None,
             speed: 1.0,
-            tempo: TimeStretcher::new(channels, sample_rate, 1.0),
+            tempo: TimeStretcher::new(channels, decode_rate, 1.0),
             tempo_out: Vec::new(),
+            dsp,
+            path: path.to_path_buf(),
+            probe,
         };
 
         Ok((session, info))
     }
 
+    fn kill_child(&mut self) {
+        self.stdout = None;
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+
+    fn spawn_at(&mut self, absolute: f64) -> Result<(), String> {
+        self.kill_child();
+        self.leftover.clear();
+        let mut child = ffmpeg::spawn_decoder(&self.path, &self.probe, absolute.max(0.0))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| "无法读取 FFmpeg 解码输出".to_string())?;
+        self.stdout = Some(BufReader::new(stdout));
+        self.child = Some(child);
+        Ok(())
+    }
+
     fn configure_output(&mut self, out_rate: u32, out_channels: usize) {
         self.resampler =
-            OutputResampler::new(self.src_rate, self.src_channels, out_rate, out_channels);
+            OutputResampler::new(self.decode_rate, self.decode_channels, out_rate, out_channels);
         self.pending.clear();
         self.out_rate = out_rate;
         self.out_channels = out_channels.max(1);
@@ -947,6 +885,10 @@ impl Session {
         self.tempo_out.clear();
     }
 
+    fn set_dsp(&mut self, settings: DspSettings) {
+        self.dsp.set_settings(settings);
+    }
+
     fn remaining_output_samples(&self) -> Option<usize> {
         self.frames_limit.map(|limit| {
             let remaining = limit.saturating_sub(self.emitted_frames);
@@ -970,23 +912,12 @@ impl Session {
     fn seek(&mut self, secs: f64) -> Result<(), String> {
         let relative = secs.max(0.0);
         let absolute = self.segment_start + relative;
-        let time = Time::new(absolute as u64, absolute.fract());
-        self.format
-            .seek(
-                SeekMode::Accurate,
-                SeekTo::Time {
-                    time,
-                    track_id: Some(self.track_id),
-                },
-            )
-            .map_err(|e| format!("跳转失败: {e}"))?;
-        self.decoder.reset();
+        self.spawn_at(absolute)?;
         self.resampler.reset();
         self.tempo.reset(self.speed);
         self.tempo_out.clear();
-        self.sample_buf = None;
-        self.sample_spec = None;
         self.pending.clear();
+        self.dsp.reset();
         self.finished = false;
         self.current_offset = relative;
         self.emitted_frames = 0;
@@ -997,6 +928,7 @@ impl Session {
     fn mark_finished(&mut self) -> Result<(), String> {
         if !self.finished {
             self.finished = true;
+            self.kill_child();
             if (self.speed - 1.0).abs() > 1e-4 {
                 self.tempo_out.clear();
                 self.tempo.flush(&mut self.tempo_out);
@@ -1025,64 +957,58 @@ impl Session {
             return Ok(());
         }
 
-        let packet = match self.format.next_packet() {
-            Ok(packet) => packet,
-            Err(SymphoniaError::IoError(e)) if e.kind() == ErrorKind::UnexpectedEof => {
-                return self.mark_finished();
-            }
-            Err(SymphoniaError::ResetRequired) => {
-                return self.mark_finished();
-            }
-            Err(e) => return Err(format!("读取数据包失败: {e}")),
+        let frame_bytes = 4 * self.decode_channels.max(1);
+        let mut bytes = [0u8; 65536];
+        let read = match self.stdout.as_mut() {
+            Some(reader) => loop {
+                match reader.read(&mut bytes) {
+                    Ok(0) => break 0,
+                    Ok(count) => break count,
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(error) => return Err(format!("读取 FFmpeg 解码数据失败: {error}")),
+                }
+            },
+            None => 0,
         };
 
-        if packet.track_id() != self.track_id {
-            return Ok(());
+        if read > 0 {
+            self.leftover.extend_from_slice(&bytes[..read]);
+        }
+        let usable = self.leftover.len() - (self.leftover.len() % frame_bytes);
+        if usable > 0 {
+            let mut samples = Vec::with_capacity(usable / 4);
+            for chunk in self.leftover[..usable].chunks_exact(4) {
+                samples.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+            }
+            self.leftover.drain(..usable);
+            self.dsp.process(&mut samples);
+            if (self.speed - 1.0).abs() <= 1e-4 {
+                self.resampler
+                    .process(&samples, &mut self.pending)
+                    .map_err(|error| format!("重采样失败: {error}"))?;
+            } else {
+                self.tempo_out.clear();
+                self.tempo.process(&samples, &mut self.tempo_out);
+                if !self.tempo_out.is_empty() {
+                    self.resampler
+                        .process(&self.tempo_out, &mut self.pending)
+                        .map_err(|error| format!("重采样失败: {error}"))?;
+                }
+            }
         }
 
-        match self.decoder.decode(&packet) {
-            Ok(audio_buf) => {
-                let spec = *audio_buf.spec();
-                let need = audio_buf.capacity();
-                let rebuild = match (&self.sample_buf, self.sample_spec) {
-                    (Some(buf), Some((rate, channels))) => {
-                        buf.capacity() < need
-                            || rate != spec.rate
-                            || channels != spec.channels.count()
-                    }
-                    _ => true,
-                };
-                if rebuild {
-                    self.sample_buf = Some(SampleBuffer::<f32>::new(need as u64, spec));
-                    self.sample_spec = Some((spec.rate, spec.channels.count()));
-                }
-                let buf = self
-                    .sample_buf
-                    .as_mut()
-                    .expect("sample buffer initialized above");
-                buf.copy_interleaved_ref(audio_buf);
-                if (self.speed - 1.0).abs() <= 1e-4 {
-                    self.resampler
-                        .process(buf.samples(), &mut self.pending)
-                        .map_err(|e| format!("重采样失败: {e}"))?;
-                } else {
-                    self.tempo_out.clear();
-                    self.tempo.process(buf.samples(), &mut self.tempo_out);
-                    if !self.tempo_out.is_empty() {
-                        self.resampler
-                            .process(&self.tempo_out, &mut self.pending)
-                            .map_err(|e| format!("重采样失败: {e}"))?;
-                    }
-                }
-            }
-            Err(SymphoniaError::DecodeError(_)) => {}
-            Err(SymphoniaError::IoError(e)) if e.kind() == ErrorKind::UnexpectedEof => {
-                self.mark_finished()?;
-            }
-            Err(e) => return Err(format!("解码失败: {e}")),
+        if read == 0 {
+            self.leftover.clear();
+            self.mark_finished()?;
         }
 
         Ok(())
+    }
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        self.kill_child();
     }
 }
 
@@ -1162,6 +1088,7 @@ struct NextInfo {
     path: String,
     title: String,
     codec: String,
+    dsd: bool,
     sample_rate: u32,
     bits: Option<u32>,
     channels: usize,
@@ -1324,10 +1251,10 @@ fn create_active_output(
 ) -> Result<ActiveOutput, String> {
     shared.exclusive_base.store(0, Ordering::Relaxed);
     if pref == OutputMode::Exclusive {
-        let (producer, consumer) = make_ring(session.src_rate, session.src_channels);
+        let (producer, consumer) = make_ring(session.decode_rate, session.decode_channels);
         match wasapi_exclusive::spawn(
-            session.src_rate,
-            session.src_channels,
+            session.decode_rate,
+            session.decode_channels,
             session.src_bits,
             Arc::clone(&consumer),
             Arc::clone(shared),
@@ -1613,13 +1540,21 @@ where
                                 meta.title = info.title;
                                 meta.path = path.to_string_lossy().to_string();
                                 meta.codec = info.codec;
+                                meta.dsd = info.dsd;
                                 meta.sample_rate = info.sample_rate;
                                 meta.bits = info.bits;
                                 meta.channels = info.channels;
                                 meta.duration = new_session.segment_duration;
                                 meta.segment_start = start.max(0.0);
                                 meta.error = None;
-                                meta.note = None;
+                                meta.note = if info.dsd {
+                                    Some(format!(
+                                        "DSD 源已转为 PCM {} kHz",
+                                        info.decode_rate as f64 / 1000.0
+                                    ))
+                                } else {
+                                    None
+                                };
                             }
 
                             let effective_mode = if force_shared {
@@ -1703,6 +1638,7 @@ where
                                                 .to_string(),
                                             title: info.title,
                                             codec: info.codec,
+                                            dsd: info.dsd,
                                             sample_rate: info.sample_rate,
                                             bits: info.bits,
                                             channels: info.channels,
@@ -1820,6 +1756,7 @@ where
                         preloaded = None;
                         transition = None;
                         // 共享链路原地清空环形缓冲，不重建输出流，避免爆音与卡顿
+                        let had_output = output.is_some();
                         let keep_shared = output
                             .as_ref()
                             .map(|out| out.mode == OutputMode::Shared)
@@ -1839,33 +1776,40 @@ where
                                 exclusive_guard = None;
                                 if keep_shared {
                                     shared.playing.store(was_playing, Ordering::Relaxed);
-                                } else if let Some(device_setup) = setup.as_ref() {
-                                    output = None;
-                                    let effective_mode = if force_shared {
-                                        OutputMode::Shared
-                                    } else {
-                                        preferred_mode
-                                    };
-                                    match create_active_output(
-                                        effective_mode,
-                                        s,
-                                        &shared,
-                                        device_setup,
-                                    ) {
-                                        Ok(new_output) => {
-                                            if new_output.mode == OutputMode::Exclusive {
-                                                exclusive_guard = Some((
-                                                    Instant::now(),
-                                                    shared.snapshot().position,
-                                                ));
+                                } else if had_output {
+                                    // 独占/ASIO 已被暂停释放时不要重新抢占声卡
+                                    if let Some(device_setup) = setup.as_ref() {
+                                        output = None;
+                                        let effective_mode = if force_shared {
+                                            OutputMode::Shared
+                                        } else {
+                                            preferred_mode
+                                        };
+                                        match create_active_output(
+                                            effective_mode,
+                                            s,
+                                            &shared,
+                                            device_setup,
+                                        ) {
+                                            Ok(new_output) => {
+                                                if new_output.mode == OutputMode::Exclusive {
+                                                    exclusive_guard = Some((
+                                                        Instant::now(),
+                                                        shared.snapshot().position,
+                                                    ));
+                                                }
+                                                output = Some(new_output);
+                                                shared
+                                                    .playing
+                                                    .store(was_playing, Ordering::Relaxed);
                                             }
-                                            output = Some(new_output);
-                                            shared.playing.store(was_playing, Ordering::Relaxed);
+                                            Err(e) => shared.report_error(e),
                                         }
-                                        Err(e) => shared.report_error(e),
+                                    } else {
+                                        shared.report_note(
+                                            "输出设备不可用，已暂停播放".to_string(),
+                                        );
                                     }
-                                } else {
-                                    shared.report_note("输出设备不可用，已暂停播放".to_string());
                                 }
                             }
                             Err(e) => shared.report_error(e),
@@ -1909,6 +1853,14 @@ where
                             }
                             Err(error) => shared.report_error(error),
                         }
+                    }
+                }
+                Command::SetDsp(settings) => {
+                    if let Some(current) = session.as_mut() {
+                        current.set_dsp(settings.clone());
+                    }
+                    if let Some(next) = preloaded.as_mut() {
+                        next.session.set_dsp(settings.clone());
                     }
                 }
                 Command::SetOutputMode(mode) => {
@@ -2004,6 +1956,7 @@ where
                     meta.path = pending.info.path;
                     meta.title = pending.info.title;
                     meta.codec = pending.info.codec;
+                    meta.dsd = pending.info.dsd;
                     meta.sample_rate = pending.info.sample_rate;
                     meta.bits = pending.info.bits;
                     meta.channels = pending.info.channels;

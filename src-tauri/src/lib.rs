@@ -1,4 +1,5 @@
 pub mod audio;
+pub mod ffmpeg;
 pub mod library;
 pub mod lyrics;
 mod shortcuts;
@@ -102,6 +103,24 @@ fn player_set_speed(state: State<'_, EngineState>, speed: f32) {
 }
 
 #[tauri::command]
+fn player_set_dsp(
+    state: State<'_, EngineState>,
+    enabled: bool,
+    bands: Vec<f32>,
+    preamp: f32,
+    normalize: bool,
+) {
+    if let Ok(engine) = state.0.lock() {
+        engine.set_dsp(audio::DspSettings::from_bands(enabled, bands, preamp, normalize));
+    }
+}
+
+#[tauri::command]
+fn ffmpeg_info() -> Result<ffmpeg::FfmpegInfo, String> {
+    ffmpeg::version()
+}
+
+#[tauri::command]
 fn player_set_output_mode(state: State<'_, EngineState>, mode: String) -> Result<(), String> {
     let mode = OutputMode::parse(&mode).ok_or_else(|| format!("未知输出模式: {mode}"))?;
     if let Ok(engine) = state.0.lock() {
@@ -156,6 +175,9 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
+            if let Ok(dir) = app.path().resource_dir() {
+                ffmpeg::set_resource_dir(dir);
+            }
             let smtc_slot: Arc<Mutex<Option<smtc::SmtcController>>> =
                 Arc::new(Mutex::new(None));
             let smtc_for_engine = Arc::clone(&smtc_slot);
@@ -214,6 +236,8 @@ pub fn run() {
             player_seek,
             player_set_volume,
             player_set_speed,
+            player_set_dsp,
+            ffmpeg_info,
             player_set_output_mode,
             player_state,
             smtc_set_metadata,

@@ -6,12 +6,6 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use rusqlite::{params, Connection, OptionalExtension};
-use symphonia::core::codecs::DecoderOptions;
-use symphonia::core::formats::{FormatOptions, SeekMode, SeekTo};
-use symphonia::core::io::MediaSourceStream;
-use symphonia::core::meta::{MetadataOptions, StandardTagKey, StandardVisualKey};
-use symphonia::core::probe::Hint;
-use symphonia::core::units::Time;
 use tauri::{AppHandle, Emitter};
 use walkdir::WalkDir;
 
@@ -19,8 +13,9 @@ use super::{cue, db, now_secs, path_string, ScanStatus};
 use crate::lyrics::decode_text;
 
 const AUDIO_EXTENSIONS: &[&str] = &[
-    "flac", "mp3", "m4a", "mp4", "aac", "ogg", "opus", "wav", "aiff", "aif", "alac", "ape",
-    "wma", "dsf", "dff", "wv",
+    "flac", "mp3", "m4a", "m4b", "mp4", "aac", "ogg", "oga", "opus", "spx", "wav", "wave",
+    "aiff", "aif", "aifc", "alac", "ape", "wma", "wmv", "dsf", "dff", "wv", "tta", "tak",
+    "mpc", "mpp", "mp+", "caf", "mka", "webm", "ac3", "eac3", "dts", "dtshd", "mlp", "thd",
 ];
 
 fn is_audio(path: &Path) -> bool {
@@ -35,23 +30,6 @@ fn file_stem(path: &Path) -> String {
         .and_then(|name| name.to_str())
         .unwrap_or("未知曲目")
         .to_string()
-}
-
-fn parse_number(value: &str) -> Option<u32> {
-    value
-        .trim()
-        .split(['/', ' '])
-        .next()
-        .and_then(|part| part.parse::<u32>().ok())
-}
-
-fn parse_year(value: &str) -> Option<u32> {
-    let digits: String = value
-        .chars()
-        .filter(|c| c.is_ascii_digit())
-        .take(4)
-        .collect();
-    digits.parse::<u32>().ok()
 }
 
 struct Parsed {
@@ -107,140 +85,69 @@ impl Parsed {
 }
 
 fn parse_metadata(path: &Path, size: i64) -> Result<Parsed, String> {
-    let file = fs::File::open(path).map_err(|e| format!("打开失败: {e}"))?;
-    let mss = MediaSourceStream::new(Box::new(file), Default::default());
-
-    let mut hint = Hint::new();
-    if let Some(ext) = path.extension().and_then(|ext| ext.to_str()) {
-        hint.with_extension(ext);
-    }
-
-    let probed = symphonia::default::get_probe()
-        .format(
-            &hint,
-            mss,
-            &FormatOptions {
-                enable_gapless: true,
-                ..Default::default()
-            },
-            &MetadataOptions::default(),
-        )
-        .map_err(|e| format!("无法识别格式: {e}"))?;
-
-    let mut format = probed.format;
-    let (track_id, params) = {
-        let track = format
-            .default_track()
-            .ok_or_else(|| "没有默认音轨".to_string())?;
-        (track.id, track.codec_params.clone())
-    };
-
-    let extension = path
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .map(|ext| ext.to_ascii_lowercase())
-        .unwrap_or_default();
-
-    let codec = if extension == "opus" {
-        "Opus".to_string()
-    } else {
-        symphonia::default::get_codecs()
-            .get_codec(params.codec)
-            .map(|desc| desc.short_name.to_string())
-            .unwrap_or_else(|| extension.to_ascii_uppercase())
-    };
-
-    let mut sample_rate = params.sample_rate;
-    let mut channels = params.channels.map(|value| value.count() as u32);
-    if sample_rate.is_none() || channels.is_none() {
-        if let Ok(mut decoder) =
-            symphonia::default::get_codecs().make(&params, &DecoderOptions::default())
-        {
-            if let Ok(packet) = format.next_packet() {
-                if packet.track_id() == track_id {
-                    if let Ok(audio_buf) = decoder.decode(&packet) {
-                        let spec = *audio_buf.spec();
-                        sample_rate = Some(spec.rate);
-                        channels = Some(spec.channels.count() as u32);
-                    }
-                }
-            }
-            let _ = format.seek(
-                SeekMode::Accurate,
-                SeekTo::Time {
-                    time: Time::new(0, 0.0),
-                    track_id: Some(track_id),
-                },
-            );
-            decoder.reset();
-        }
-    }
-
-    let duration = match (params.time_base, params.n_frames) {
-        (Some(tb), Some(frames)) => {
-            let time = tb.calc_time(frames);
-            time.seconds as f64 + time.frac
-        }
-        _ => 0.0,
-    };
-
+    let probe = crate::ffmpeg::probe(path)?;
     let mut parsed = Parsed {
-        title: file_stem(path),
-        artist: None,
-        album: None,
-        album_artist: None,
-        track_no: None,
-        disc_no: None,
-        year: None,
-        genre: None,
-        duration,
-        codec,
-        sample_rate,
-        bits: params.bits_per_sample,
-        channels,
-        bitrate: None,
+        title: probe.title.clone().unwrap_or_else(|| file_stem(path)),
+        artist: probe.artist.clone(),
+        album: probe.album.clone(),
+        album_artist: probe.album_artist.clone(),
+        track_no: probe.track_no,
+        disc_no: probe.disc_no,
+        year: probe.year,
+        genre: probe.genre.clone(),
+        duration: probe.duration,
+        codec: probe.codec_display(),
+        sample_rate: Some(probe.source_rate),
+        bits: probe.bits,
+        channels: Some(probe.channels as u32),
+        bitrate: probe.bitrate,
         cover: None,
     };
 
-    if let Some(revision) = format.metadata().current() {
-        for tag in revision.tags() {
-            let Some(key) = tag.std_key else {
-                continue;
-            };
-            let value = tag.value.to_string();
-            if value.trim().is_empty() {
-                continue;
-            }
-            match key {
-                StandardTagKey::TrackTitle => parsed.title = value,
-                StandardTagKey::Artist => parsed.artist = Some(value),
-                StandardTagKey::Album => parsed.album = Some(value),
-                StandardTagKey::AlbumArtist => parsed.album_artist = Some(value),
-                StandardTagKey::TrackNumber => parsed.track_no = parse_number(&value),
-                StandardTagKey::DiscNumber => parsed.disc_no = parse_number(&value),
-                StandardTagKey::Date | StandardTagKey::ReleaseDate => {
-                    if parsed.year.is_none() {
-                        parsed.year = parse_year(&value);
-                    }
-                }
-                StandardTagKey::Genre => parsed.genre = Some(value),
-                _ => {}
-            }
+    if probe.has_cover {
+        if let Ok(Some(cover)) = crate::ffmpeg::extract_cover(path) {
+            parsed.cover = Some(cover);
         }
-
-        let visual = revision
-            .visuals()
-            .iter()
-            .find(|visual| matches!(visual.usage, Some(StandardVisualKey::FrontCover)))
-            .or_else(|| revision.visuals().first());
-        if let Some(visual) = visual {
-            if !visual.data.is_empty() && visual.data.len() <= 32 * 1024 * 1024 {
-                parsed.cover = Some((visual.data.to_vec(), visual.media_type.clone()));
-            }
-        }
+    }
+    if parsed.cover.is_none() {
+        parsed.cover = folder_cover(path);
     }
 
     Ok(parsed.with_size(size))
+}
+
+fn folder_cover(audio: &Path) -> Option<(Vec<u8>, String)> {
+    let dir = audio.parent()?;
+    for entry in fs::read_dir(dir).ok()?.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        let name = name.to_ascii_lowercase();
+        if !matches!(
+            name.as_str(),
+            "cover.jpg"
+                | "cover.jpeg"
+                | "cover.png"
+                | "folder.jpg"
+                | "folder.jpeg"
+                | "folder.png"
+                | "front.jpg"
+                | "front.png"
+                | "album.jpg"
+                | "album.png"
+        ) {
+            continue;
+        }
+        if let Ok(data) = fs::read(&path) {
+            let mime = crate::ffmpeg::sniff_image_mime(&data);
+            return Some((data, mime));
+        }
+    }
+    None
 }
 
 fn fnv1a(bytes: &[u8]) -> u64 {

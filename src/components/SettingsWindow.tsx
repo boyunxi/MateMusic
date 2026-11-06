@@ -10,6 +10,7 @@ import { Logo } from "./Shell";
 import type { AccentKey } from "../types";
 import { appWindow, inTauri } from "../lib/tauri";
 import { getLibraryStats, type LibraryStats } from "../lib/nativeLibrary";
+import { nativePlayer } from "../lib/nativePlayer";
 
 const SECTIONS = [
   { id: "general", label: "常规设置", icon: Settings2 },
@@ -142,12 +143,14 @@ export function SettingsWindow() {
   const [active, setActive] = useState<string>("general");
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
   const [libStats, setLibStats] = useState<LibraryStats | null>(null);
+  const [ffmpeg, setFfmpeg] = useState<{ path: string; version: string } | null>(null);
   const lockSpy = useRef(0);
   const engine = getEngine();
 
   useEffect(() => {
     if (!inTauri || !s.settingsOpen) return;
     void getLibraryStats().then(setLibStats).catch(() => {});
+    void nativePlayer.ffmpegInfo().then(setFfmpeg).catch(() => {});
   }, [s.settingsOpen, s.tracks.length]);
 
   // Output device discovery
@@ -311,9 +314,15 @@ export function SettingsWindow() {
                     </Row>
                   </Section>
 
-                  <Section id="audio" title="音频与输出设备" desc={inTauri ? "Rust 音频核心：独占直通、Bit-Perfect 与系统媒体控制" : "输出路由、动态处理与播放过渡"}>
+                  <Section id="audio" title="音频与输出设备" desc={inTauri ? "FFmpeg 解码 · Rust 实时处理与输出" : "输出路由、动态处理与播放过渡"}>
                     {inTauri ? (
                       <>
+                        <Row title="解码核心" desc={ffmpeg?.version ?? "FFmpeg / ffprobe 随应用分发，支持 APE、DSD、WMA、ALAC 等格式"}>
+                          <span className="flex h-7 shrink-0 items-center gap-1.5 rounded-full bg-white/10 px-3 text-[11.5px] font-medium text-white/70">
+                            <AudioLines className="h-3.5 w-3.5 shrink-0" />
+                            FFmpeg
+                          </span>
+                        </Row>
                         <Row title="输出模式" desc="共享模式可与其他应用同时发声；独占模式会占用声卡，期间网页视频/其他播放器可能无声或卡顿">
                           <Select
                             value={st.outputMode}
@@ -332,12 +341,17 @@ export function SettingsWindow() {
                             {s.native?.outputMode ?? st.outputMode}
                           </span>
                         </Row>
-                        <Row title="音频通路" desc={s.nativeActive ? "本地曲目由 Rust 核心解码并直通输出，WebView 只负责界面与状态" : "当前为精选/网络音源，使用 WebView 内 Web Audio 通路"}>
+                        <Row title="音频通路" desc={s.nativeActive ? "本地曲目由 FFmpeg 解码、Rust DSP 处理后直通输出，WebView 只负责界面与状态" : "当前为精选/网络音源，使用 WebView 内 Web Audio 通路"}>
                           <span className={cn("flex h-7 shrink-0 items-center gap-1.5 rounded-full px-3 text-[11.5px] font-medium", s.nativeActive ? "bg-emerald-400/15 text-emerald-300" : "bg-white/10 text-white/60")}>
                             <AudioLines className="h-3.5 w-3.5 shrink-0" />
-                            {s.nativeActive ? "Rust Core" : "Web Audio"}
+                            {s.nativeActive ? "Rust · FFmpeg" : "Web Audio"}
                           </span>
                         </Row>
+                        {s.native?.dsd && (
+                          <Row title="DSD 转换" desc={`源 DSD ${(s.native.sampleRate / 1000).toFixed(1)} kHz → PCM ${(s.native.outputRate / 1000).toFixed(1)} kHz（FFmpeg 低通 + 重采样）`}>
+                            <span className="flex h-7 shrink-0 items-center rounded-full bg-sky-400/15 px-3 text-[11.5px] font-medium text-sky-300">DSD → PCM</span>
+                          </Row>
+                        )}
                         <Row title="Bit-Perfect" desc={s.native?.bitPerfectReasons?.length ? s.native.bitPerfectReasons.join(" · ") : "源文件采样格式与输出设备一致时，标记为 Bit-Perfect"}>
                           <span
                             className={cn(
@@ -396,7 +410,7 @@ export function SettingsWindow() {
                     )}
                   </Section>
 
-                  <Section id="eq" title="音效与均衡器" desc={inTauri ? "10 段参数均衡器；本地曲目由 Rust 独占通路直通，EQ 仅作用于精选/网络音源" : "10 段参数均衡器，实时作用于播放音频"}>
+                  <Section id="eq" title="音效与均衡器" desc="10 段参数均衡器与响度标准化，本地曲目由 Rust DSP 实时处理">
                     <Row title="启用均衡器">
                       <Select
                         value={st.eqPreset}
@@ -517,7 +531,7 @@ export function SettingsWindow() {
                         <span className="truncate text-[20px] font-bold">MateMusic</span>
                         <span className="truncate text-[12px] tabular-nums text-white/50">Version 1.0.0 · Spatial Glass Edition</span>
                         <div className="mt-2 flex flex-wrap gap-1.5">
-                          {["React", "TypeScript", "Tailwind CSS", "Framer Motion", inTauri ? "Tauri 2 · Rust" : "Web Audio API", inTauri ? "SQLite · WASAPI" : "IndexedDB"].map((x) => (
+                          {["React", "TypeScript", "Tailwind CSS", "Framer Motion", inTauri ? "Tauri 2 · Rust" : "Web Audio API", inTauri ? "FFmpeg · SQLite · WASAPI" : "IndexedDB"].map((x) => (
                             <span key={x} className="shrink-0 rounded-full border border-white/12 bg-white/[0.05] px-2 py-0.5 text-[10.5px] text-white/60">
                               {x}
                             </span>
@@ -528,6 +542,11 @@ export function SettingsWindow() {
                     <Row title="内置曲目致谢" desc="内置音乐由 Kevin MacLeod (incompetech.com) 创作，基于 Creative Commons: By Attribution 4.0 许可，经 Internet Archive 提供。歌词为 MateMusic 原创意境词。">
                       <span className="shrink-0 rounded-md border border-white/15 px-2 py-0.5 text-[11px] text-white/60">CC BY 4.0</span>
                     </Row>
+                    {inTauri && (
+                      <Row title="FFmpeg" desc={ffmpeg ? `${ffmpeg.version} · LGPL v3 · 随应用分发` : "LGPL v3 · 随应用分发"}>
+                        <span className="shrink-0 rounded-md border border-white/15 px-2 py-0.5 text-[11px] text-white/60">LGPL</span>
+                      </Row>
+                    )}
                     <Row
                       title="本地曲库"
                       desc={

@@ -11,6 +11,7 @@ export interface NativeSnapshot {
   title: string;
   path: string;
   codec: string;
+  dsd: boolean;
   sampleRate: number;
   bits: number | null;
   channels: number;
@@ -67,12 +68,15 @@ export const nativePlayer = {
   seek: (position: number) => invoke<void>("player_seek", { position }),
   setVolume: (volume: number) => invoke<void>("player_set_volume", { volume }),
   setSpeed: (speed: number) => invoke<void>("player_set_speed", { speed }),
+  setDsp: (enabled: boolean, bands: number[], preamp: number, normalize: boolean) =>
+    invoke<void>("player_set_dsp", { enabled, bands, preamp, normalize }),
   setOutputMode: (mode: OutputMode) => invoke<void>("player_set_output_mode", { mode }),
   getState: () => invoke<NativeSnapshot>("player_state"),
   setMetadata: (title: string, artist: string, album: string) =>
     invoke<void>("smtc_set_metadata", { title, artist, album }),
   smtcAvailable: () => invoke<boolean>("smtc_available"),
   asioStatus: () => invoke<AsioStatus>("audio_asio_status"),
+  ffmpegInfo: () => invoke<{ path: string; version: string }>("ffmpeg_info"),
   async subscribe(handler: (snapshot: NativeSnapshot) => void): Promise<UnlistenFn> {
     if (!inTauri) return () => {};
     const unlisten = await tauriListen<NativeSnapshot>("playback://state", (snapshot) => {
