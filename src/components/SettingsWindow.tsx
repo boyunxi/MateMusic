@@ -314,7 +314,7 @@ export function SettingsWindow() {
                   <Section id="audio" title="音频与输出设备" desc={inTauri ? "Rust 音频核心：独占直通、Bit-Perfect 与系统媒体控制" : "输出路由、动态处理与播放过渡"}>
                     {inTauri ? (
                       <>
-                        <Row title="输出模式" desc="独占模式绕过系统混音器，共享模式兼容其他应用；ASIO 仅在有可用驱动时生效">
+                        <Row title="输出模式" desc="共享模式可与其他应用同时发声；独占模式会占用声卡，期间网页视频/其他播放器可能无声或卡顿">
                           <Select
                             value={st.outputMode}
                             width="w-44"

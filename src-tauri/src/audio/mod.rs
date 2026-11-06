@@ -1763,11 +1763,56 @@ where
                             }
                         }
                     }
+                    if session.is_some() && output.is_none() {
+                        if let (Some(s), Some(device_setup)) =
+                            (session.as_mut(), setup.as_ref())
+                        {
+                            // Exclusive/ASIO output was released on pause so other
+                            // apps can use the device; rebuild it at the paused spot.
+                            let position = shared.snapshot().position;
+                            shared.played_samples.store(0, Ordering::Relaxed);
+                            shared.set_base(position);
+                            let effective_mode = if force_shared {
+                                OutputMode::Shared
+                            } else {
+                                preferred_mode
+                            };
+                            match create_active_output(
+                                effective_mode,
+                                s,
+                                &shared,
+                                device_setup,
+                            ) {
+                                Ok(new_output) => {
+                                    if new_output.mode == OutputMode::Exclusive {
+                                        exclusive_guard =
+                                            Some((Instant::now(), shared.snapshot().position));
+                                    }
+                                    output = Some(new_output);
+                                }
+                                Err(e) => shared.report_error(e),
+                            }
+                        }
+                    }
                     if session.is_some() && output.is_some() {
                         shared.playing.store(true, Ordering::Relaxed);
                     }
                 }
-                Command::Pause => shared.playing.store(false, Ordering::Relaxed),
+                Command::Pause => {
+                    shared.playing.store(false, Ordering::Relaxed);
+                    // Release exclusive/ASIO devices while paused; otherwise the
+                    // sound card stays locked and browser video playback stalls.
+                    let releases_device = output
+                        .as_ref()
+                        .map(|out| out.mode != OutputMode::Shared)
+                        .unwrap_or(false);
+                    if releases_device {
+                        output = None;
+                        preloaded = None;
+                        transition = None;
+                        exclusive_guard = None;
+                    }
+                }
                 Command::Seek(secs) => {
                     if let Some(s) = session.as_mut() {
                         let was_playing = shared.playing.load(Ordering::Relaxed);

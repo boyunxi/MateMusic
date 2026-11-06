@@ -29,7 +29,7 @@ export const DEFAULT_SETTINGS: Settings = {
   closeBehavior: "sleep",
   doubleClickAction: "play",
   outputDeviceId: "",
-  outputMode: "exclusive",
+  outputMode: "shared",
   normalize: false,
   preservePitch: true,
   fade: true,
@@ -172,13 +172,22 @@ function reducer(s: PlayerState, a: Action): PlayerState {
 
 const LS_KEY = "matemusic:state:v1";
 const LS_TIME = "matemusic:time:v1";
+const LS_AUDIO_MODE_MIGRATION = "matemusic:audio-mode-migration:v1";
 
 function loadPersisted(): Partial<PlayerState> {
   try {
     const raw = localStorage.getItem(LS_KEY);
     if (!raw) return {};
     const p = JSON.parse(raw);
-    return { ...p, settings: { ...DEFAULT_SETTINGS, ...(p.settings || {}) } };
+    const settings = { ...DEFAULT_SETTINGS, ...(p.settings || {}) };
+    // The previous build defaulted to WASAPI exclusive, which locks the sound
+    // card and stalls browser video playback. Move existing installs to shared
+    // once; users can still opt back into exclusive explicitly.
+    if (!localStorage.getItem(LS_AUDIO_MODE_MIGRATION)) {
+      if (settings.outputMode === "exclusive") settings.outputMode = "shared";
+      localStorage.setItem(LS_AUDIO_MODE_MIGRATION, "1");
+    }
+    return { ...p, settings };
   } catch {
     return {};
   }
@@ -587,7 +596,16 @@ function useBuildActions(dispatch: React.Dispatch<Action>, stateRef: React.Mutab
         if (!inTauri) return;
         void nativePlayer
           .setOutputMode(mode)
-          .then(() => toast(mode === "exclusive" ? "已切换独占输出" : mode === "asio" ? "已切换 ASIO 输出" : "已切换共享输出", "success"))
+          .then(() =>
+            toast(
+              mode === "exclusive"
+                ? "已切换独占输出：声卡被独占，其他应用可能无声或视频卡顿"
+                : mode === "asio"
+                  ? "已切换 ASIO 输出"
+                  : "已切换共享输出，可与其他应用同时播放",
+              mode === "exclusive" ? "info" : "success",
+            ),
+          )
           .catch((error) => toast(String(error), "error"));
       },
       setLoop: (loopMode: LoopMode) => dispatch({ type: "PATCH", patch: { loopMode } }),
