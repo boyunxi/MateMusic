@@ -339,7 +339,7 @@ export function ImmersivePlayer() {
           </div>
 
           {/* top bar */}
-          <div className="relative flex h-16 shrink-0 items-center gap-3 px-6">
+          <div data-tauri-drag-region className="relative flex h-16 shrink-0 items-center gap-3 px-6">
             <IconButton label="收起 (Esc)" variant="neu" icon={<ChevronDown className="h-5 w-5" />} onClick={() => a.setImmersive(false)} />
             <div className="flex min-w-0 flex-1 flex-col items-center">
               <span className="truncate text-[11px] font-semibold uppercase tracking-[0.25em] text-white/45">Now Playing</span>

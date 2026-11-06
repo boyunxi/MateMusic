@@ -1,6 +1,7 @@
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import type { Track } from "../types";
 import { generatedCover, paletteFromSeed } from "./utils";
+import { isNativeDecodable } from "./formats";
 import { assetUrl, inTauri, invoke, tauriListen } from "./tauri";
 
 export interface LibraryTrackRow {
@@ -101,6 +102,7 @@ export function libraryRowToTrack(row: LibraryTrackRow): Track {
     libraryId: row.id,
     cueStart: row.cueStart ?? undefined,
     cueEnd: row.cueEnd ?? undefined,
+    unsupported: !isNativeDecodable(row.path),
   };
 }
 

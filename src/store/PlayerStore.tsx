@@ -268,6 +268,7 @@ function useBuildActions(dispatch: React.Dispatch<Action>, stateRef: React.Mutab
     const engine = getEngine();
     const S = () => stateRef.current;
     const find = (id: string | null) => (id ? S().tracks.find((t) => t.id === id) : undefined);
+    const playable = (t?: Track) => !!t && !(inTauri && t.path && t.unsupported);
 
     const toast = (text: string, tone: Toast["tone"] = "info") => {
       const id = toastSeq.current++;
@@ -278,6 +279,10 @@ function useBuildActions(dispatch: React.Dispatch<Action>, stateRef: React.Mutab
     const startTrack = (id: string, autoplay = true, startAt = 0) => {
       const t = find(id);
       if (!t) return;
+      if (!playable(t)) {
+        toast(`当前音频核心不支持 ${t.format} 格式（未引入 FFmpeg）`, "error");
+        return;
+      }
       dispatch({ type: "PLAY_START", id });
       if (inTauri && t.path) {
         engine.stop();
@@ -319,10 +324,7 @@ function useBuildActions(dispatch: React.Dispatch<Action>, stateRef: React.Mutab
       startTrack(id);
     };
 
-    const validQueue = () => {
-      const ids = new Set(S().tracks.map((t) => t.id));
-      return S().queue.filter((q) => ids.has(q));
-    };
+    const validQueue = () => S().queue.filter((id) => playable(find(id)));
 
     const next = (auto = false) => {
       const s = S();
@@ -377,7 +379,8 @@ function useBuildActions(dispatch: React.Dispatch<Action>, stateRef: React.Mutab
     const togglePlay = () => {
       const s = S();
       if (!s.currentId || !isLoaded()) {
-        const id = s.currentId && find(s.currentId) ? s.currentId : validQueue()[0] || s.tracks[0]?.id;
+        const cur = s.currentId ? find(s.currentId) : undefined;
+        const id = playable(cur) ? cur!.id : validQueue()[0] || s.tracks.find((t) => playable(t))?.id;
         if (id) startTrack(id);
         return;
       }
@@ -844,7 +847,13 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       void nativePlayer.setOutputMode(s.settings.outputMode).catch(() => {});
       const all = [...s.tracks, ...locals];
       const cur = all.find((t) => t.id === s.currentId);
-      if (cur && s.settings.restoreSession) {
+      if (cur?.unsupported) {
+        dispatch({ type: "PATCH", patch: { currentId: null, nativeActive: false } });
+        actionsRef.current.toast(
+          `上次播放的「${cur.title}」为 ${cur.format} 格式，当前音频核心不支持（未引入 FFmpeg）`,
+          "error",
+        );
+      } else if (cur && s.settings.restoreSession) {
         let at = 0;
         try {
           const saved = JSON.parse(localStorage.getItem(LS_TIME) || "null");

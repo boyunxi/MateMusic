@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion, useDragControls } from "framer-motion";
-import { AudioLines, FolderInput, Info, Keyboard, Minus, Palette, Settings2, SlidersHorizontal, Speaker, X, RotateCcw, Trash2, Check } from "lucide-react";
+import { AudioLines, FolderInput, Info, Keyboard, Minus, Palette, Power, Settings2, SlidersHorizontal, Speaker, X, RotateCcw, Trash2, Check } from "lucide-react";
 import { ACCENTS, useActions, useCurrentTrack, usePlayer } from "../store/PlayerStore";
 import { EQ_FREQS, getEngine } from "../lib/audioEngine";
 import { formatBytes, formatDurationLong } from "../lib/utils";
@@ -8,7 +8,7 @@ import { cn } from "../utils/cn";
 import { Kbd, Select, Slider, SPRING, Switch } from "./ui";
 import { Logo } from "./Shell";
 import type { AccentKey } from "../types";
-import { inTauri } from "../lib/tauri";
+import { appWindow, inTauri } from "../lib/tauri";
 import { getLibraryStats, type LibraryStats } from "../lib/nativeLibrary";
 
 const SECTIONS = [
@@ -547,6 +547,14 @@ export function SettingsWindow() {
                     <Row title="恢复默认设置" desc="重置外观、音效与偏好，不会删除曲库">
                       <ConfirmButton label="恢复默认" confirmLabel="确认恢复" icon={RotateCcw} onConfirm={a.resetSettings} />
                     </Row>
+                    {inTauri && (
+                      <Row title="退出应用" desc="关闭 MateMusic；标题栏关闭按钮默认进入休眠/迷你模式，Ctrl+W 可直接退出">
+                        <button onClick={() => void appWindow.close()} className="neu-btn flex h-8 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full px-3.5 text-[12px] font-medium text-white/80">
+                          <Power className="h-3.5 w-3.5 shrink-0" />
+                          退出
+                        </button>
+                      </Row>
+                    )}
                   </Section>
                   <div className="h-[40vh]" />
                 </div>

@@ -10,6 +10,31 @@ import { cn } from "../utils/cn";
 import { Kbd, SPRING } from "./ui";
 import type { NavKey } from "../types";
 import { appWindow, inTauri } from "../lib/tauri";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+
+type ResizeDirection = "East" | "North" | "NorthEast" | "NorthWest" | "South" | "SouthEast" | "SouthWest" | "West";
+
+/* ---------------- Frameless resize handles ---------------- */
+export function ResizeHandles() {
+  if (!inTauri) return null;
+  const start = (direction: ResizeDirection) => (event: React.PointerEvent) => {
+    event.preventDefault();
+    void getCurrentWindow().startResizeDragging(direction);
+  };
+  const edge = "fixed z-[130]";
+  return (
+    <>
+      <div className={`${edge} left-0 top-3 bottom-3 w-1 cursor-ew-resize`} onPointerDown={start("West")} />
+      <div className={`${edge} right-0 top-3 bottom-3 w-1 cursor-ew-resize`} onPointerDown={start("East")} />
+      <div className={`${edge} left-3 right-3 top-0 h-1 cursor-ns-resize`} onPointerDown={start("North")} />
+      <div className={`${edge} left-3 right-3 bottom-0 h-1 cursor-ns-resize`} onPointerDown={start("South")} />
+      <div className={`${edge} left-0 top-0 h-3 w-3 cursor-nwse-resize`} onPointerDown={start("NorthWest")} />
+      <div className={`${edge} right-0 top-0 h-3 w-3 cursor-nesw-resize`} onPointerDown={start("NorthEast")} />
+      <div className={`${edge} left-0 bottom-0 h-3 w-3 cursor-nesw-resize`} onPointerDown={start("SouthWest")} />
+      <div className={`${edge} right-0 bottom-0 h-3 w-3 cursor-nwse-resize`} onPointerDown={start("SouthEast")} />
+    </>
+  );
+}
 
 /* ---------------- Ambient background ---------------- */
 export function AmbientBackground() {
@@ -85,6 +110,10 @@ export function TitleBar() {
         inputRef.current?.focus();
         inputRef.current?.select();
       }
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "w" && inTauri) {
+        e.preventDefault();
+        void appWindow.close();
+      }
     };
     window.addEventListener("keydown", k);
     return () => {
@@ -157,7 +186,7 @@ export function TitleBar() {
           {fullscreen || maximized ? <Copy className="h-3.5 w-3.5" /> : <Square className="h-3.5 w-3.5" />}
         </button>
         <button
-          title="关闭"
+          title={s.settings.closeBehavior === "mini" ? "关闭（缩为迷你播放器，Ctrl+W 退出）" : "关闭（进入休眠，Ctrl+W 退出）"}
           onClick={() => a.setWindowMode(s.settings.closeBehavior === "mini" ? "mini" : "sleep")}
           className={cn(winBtn, "hover:bg-rose-500/85 hover:text-white")}
         >

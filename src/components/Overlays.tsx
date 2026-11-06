@@ -145,7 +145,7 @@ export function MiniPlayer() {
   const a = useActions();
   const track = useCurrentTrack();
   return (
-    <div className="relative grid h-full w-full place-items-center">
+    <div data-tauri-drag-region className="relative grid h-full w-full place-items-center">
       <AmbientBackground />
       <motion.div
         drag
@@ -182,7 +182,7 @@ export function MiniPlayer() {
 export function SleepScreen() {
   const a = useActions();
   return (
-    <div className="relative grid h-full w-full place-items-center bg-[#06050b]">
+    <div data-tauri-drag-region className="relative grid h-full w-full place-items-center bg-[#06050b]">
       <motion.div initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} transition={SPRING} className="flex flex-col items-center text-center">
         <Logo size={64} />
         <p className="mt-6 text-[20px] font-semibold">MateMusic 已休眠</p>

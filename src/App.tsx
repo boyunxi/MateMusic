@@ -1,5 +1,5 @@
 import { PlayerProvider, useActions, usePlayer } from "./store/PlayerStore";
-import { AmbientBackground, Sidebar, TitleBar } from "./components/Shell";
+import { AmbientBackground, ResizeHandles, Sidebar, TitleBar } from "./components/Shell";
 import { LibraryView } from "./components/LibraryView";
 import { Dock, FloatingLyrics } from "./components/Dock";
 import { QueueDrawer } from "./components/QueueDrawer";
@@ -52,6 +52,7 @@ function MateMusicShell() {
       <ImportProgress />
       <Toasts />
       <DropOverlay show={dragging} />
+      <ResizeHandles />
     </div>
   );
 }
