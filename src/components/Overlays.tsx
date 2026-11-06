@@ -8,6 +8,7 @@ import { ProgressRow, TransportControls } from "./Dock";
 import { LikeButton } from "./TrackTable";
 import { AmbientBackground, Logo } from "./Shell";
 import { inTauri, onNativeDrop } from "../lib/tauri";
+import { fitMiniWindow } from "../lib/windowBounds";
 
 export function Toasts() {
   const { toasts } = usePlayer();
@@ -144,10 +145,24 @@ export function MiniPlayer() {
   const s = usePlayer();
   const a = useActions();
   const track = useCurrentTrack();
+  const cardRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = cardRef.current;
+    if (!el) return;
+    const fit = () => void fitMiniWindow(el.offsetWidth, el.offsetHeight);
+    const frame = requestAnimationFrame(fit);
+    // Re-fit after the native enter-mini resize/unmaximize settles.
+    const timer = window.setTimeout(fit, 320);
+    return () => {
+      cancelAnimationFrame(frame);
+      window.clearTimeout(timer);
+    };
+  }, []);
   return (
     <div data-tauri-drag-region className="relative grid h-full w-full place-items-center">
       <AmbientBackground />
       <motion.div
+        ref={cardRef}
         data-tauri-drag-region
         initial={{ opacity: 0, scale: 0.9, y: 20 }}
         animate={{ opacity: 1, scale: 1, y: 0 }}
