@@ -29,7 +29,7 @@ export const DEFAULT_SETTINGS: Settings = {
   closeBehavior: "sleep",
   doubleClickAction: "play",
   outputDeviceId: "",
-  outputMode: "shared",
+  outputMode: "exclusive",
   normalize: false,
   preservePitch: true,
   fade: true,
